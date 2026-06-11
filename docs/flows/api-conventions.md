@@ -39,14 +39,16 @@
 | `GET /api/v1/devices` | Bearer | `200` 数组 | 已授权 Device 列表 |
 | `DELETE /api/v1/devices/{device_id}` | Bearer | `204` | 吊销指定 Device |
 | `POST /api/v1/telemetry/install` | Bearer | `200` | 安装遥测（best-effort） |
-| `GET /api/v1/skills` | Bearer | `200` `Page<T>` | skill 列表（无搜索，sort+游标+filter） |
+| `GET /api/v1/skills` | Bearer | `200` `Page<T>` | skill 列表（无搜索，sort+游标+filter，含 `?category=`） |
+| `GET /api/v1/skills/categories` | Bearer | `200` | skill 分类 + 计数（驱动分组标题，§3.1b） |
 | `GET /api/v1/skills/{slug}` | Bearer | `200` | skill 详情 |
 | `GET /api/v1/skills/{slug}/versions` | Bearer | `200` `Page<T>` | 版本历史 |
 | `GET /api/v1/skills/{slug}/versions/{version}` | Bearer | `200` | 指定版本（含 `artifact.sha256`） |
 | `GET /api/v1/skills/{slug}/resolve?hash=` | Bearer | `200` | 指纹 → 版本（skill 更新检测） |
 | `GET /api/v1/skills/{slug}/download?version=` | Bearer | **`302`** | 跳短时效存储 URL（R2 backed） |
 | `POST /api/v1/skills/-/security-verdicts` | Bearer | `200` | 批量安全裁决（1–100） |
-| `GET /api/v1/plugins` | Bearer | `200` `Page<T>` | plugin 列表 |
+| `GET /api/v1/plugins` | Bearer | `200` `Page<T>` | plugin 列表（filter 含 `?category=`） |
+| `GET /api/v1/plugins/categories` | Bearer | `200` | plugin 分类 + 计数（驱动分组标题，§3.1b） |
 | `GET /api/v1/plugins/{name}` | Bearer | `200` | plugin 详情（含 `latestVersion`，升级比较用） |
 | `GET /api/v1/plugins/{name}/versions/{version}` | Bearer | `200` | plugin 指定版本 |
 | `GET /api/v1/plugins/{name}/download?version=` | Bearer | **`302`** | 跳短时效存储 URL |

@@ -167,7 +167,7 @@ interface Compatibility {
 
 ### 3.1 技能列表 / 插件列表（直接展示，无搜索）
 
-> **不提供搜索**（向量与关键字均不做）。桌面端直接拉取列表，靠 `sort` 排序 + 游标分页 + filter（family/channel/平台）浏览。
+> **不提供搜索**（向量与关键字均不做）。桌面端直接拉取列表，靠 `sort` 排序 + 游标分页 + filter（`category`/family/channel/平台）浏览；按 `category` 分组展示 + 计数见 §3.1b。
 
 **Skill 列表 `GET /skills?limit=&cursor=&sort=`**（`sort ∈ updated|downloads|stars|installsCurrent|trending`）
 ```ts
@@ -175,6 +175,7 @@ interface SkillListItem {
   slug: string;                // 唯一标识（URL 用）
   displayName: string;         // 展示名
   summary?: string;            // 一句话简介
+  category: { id: string; label: string } | null;     // 浏览分类（单一主分类；服务端按 capabilityTags 派生，§3.1b）
   tags: Record<string /*tag*/, string /*version*/>;   // tag → 版本号映射；tags.latest 即最新版本
   createdAt: number;           // 创建时间（Unix 毫秒）
   updatedAt: number;           // 最近更新时间（Unix 毫秒）
@@ -198,6 +199,7 @@ interface PluginListItem {
   name: string;                // 唯一标识（包名）
   displayName: string;         // 展示名
   summary?: string;            // 一句话简介
+  category: { id: string; label: string } | null; // 浏览分类（单一主分类；ClawHub 原生 pluginCategory，§3.1b）
   family: "code-plugin" | "bundle-plugin";        // 类型：执行代码的插件 / 宿主 bundle
   channel: "official" | "community" | "private";  // 渠道
   isOfficial: boolean;         // 是否官方
@@ -211,6 +213,19 @@ interface PluginListItem {
 ```
 > 网关按 `X-Platform`/`X-App-Version` 过滤掉不兼容的 plugin（见 §3.7）。
 
+### 3.1b 分类端点（驱动分组标题 + 计数）
+
+桌面端按 `category` 分组展示（plugin「电商与市场 / 营销与广告」、skill「货源与选品 / 市场调研与分析」），分组顺序与计数由分类端点提供：
+
+**`GET /skills/categories`** / **`GET /plugins/categories`** → 有序数组：
+```ts
+{ categories: { id: string; label: string; count: number }[] }   // 按运营定义顺序；count = 该分类下可见制品数
+```
+
+- **plugin 分类来源**：ClawHub 原生 `pluginCategory`（单值）+ `pluginCategoryTags`（次级标签，可选）。
+- **skill 分类来源**：skills 表**无**原生分类字段，**网关按 `capabilityTags` 派生**——维护一张有序映射 `capabilityTag → {id,label}`，取首个命中标签为主分类，无命中归 `其他`（映射为运营维护，见 clawhub-integration.md）。
+- 列表 filter `?category={id}` 只返回该分类制品；分组展示则客户端拉全量按 `category.id` 归组（制品量级小，无需服务端分组）。
+
 ### 3.2 详情 & 版本
 
 **Skill 详情 `GET /skills/{slug}`**
@@ -220,6 +235,7 @@ interface SkillDetail {
     slug: string;              // 唯一标识
     displayName: string;       // 展示名
     summary?: string;          // 简介
+    category: { id: string; label: string } | null;  // 浏览分类（§3.1b）
     tags: Record<string,string>;  // tag → 版本号；tags.latest 为最新
     createdAt: number;         // 创建时间
     updatedAt: number;         // 更新时间
@@ -261,6 +277,7 @@ interface PluginDetail {
     family: "code-plugin" | "bundle-plugin";        // 类型
     channel: "official" | "community" | "private";  // 渠道
     isOfficial: boolean;       // 是否官方
+    category: { id: string; label: string } | null; // 浏览分类（§3.1b）
   };
   latestVersion: {             // 最新版本摘要；无版本时为 null
     version: string;           // 最新版本号（= distTags.latest）——升级比较用

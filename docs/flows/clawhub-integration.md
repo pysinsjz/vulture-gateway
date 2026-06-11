@@ -67,6 +67,7 @@ v1 **不采用 souls**。
 - **changelog 自动生成**：关掉 LLM 自动生成（去 OpenAI 依赖），要求显式 changelog
 - **搜索**：**完全移除**（向量与关键字均不做）；只提供 `GET /skills`、`GET /plugins` 列表（`sort` 排序 + 游标分页 + family/channel/平台 filter）。可一并移除 `skillSearchDigest` 的 search index 与 `GET /search` 端点
 - **安全**：去外部 Codex/VT/反滥用 worker 与公开审核状态机；保留确定性静态扫描 + Plugin Inspector + 运营人工 `manualModeration`(approved/quarantined/revoked)
+- **分类（marketplace 浏览）**：plugin 用 ClawHub 原生 `pluginCategory`（单值，已索引）+ `pluginCategoryTags`；skill 表**无**原生分类字段（只有 `capabilityTags`），由网关维护一张**有序映射** `capabilityTag → {id,label}` **派生**主分类（取首个命中，无命中归 `其他`）。映射由运营维护；`category` 字段与 `/skills|plugins/categories` 端点见 skill-plugin-lifecycle.md §3.1b
 
 ## 6. 仍待跟进（唯一剩余大风险）
 
