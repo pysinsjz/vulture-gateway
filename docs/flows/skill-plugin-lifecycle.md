@@ -86,7 +86,7 @@ interface OriginFile {
   slug: string;                // 制品唯一标识
   installedVersion: string;    // 已装版本（semver）
   installedAt: number;         // 安装时间戳（Unix 毫秒）
-  fingerprint?: string;        // 安装时的内容指纹基线（64 位 hex）：fingerprint(磁盘)≠它 ⇒ 自安装后被改动（离线即知，§3.4）
+  fingerprint?: string;        // 安装时内容指纹基线（64 位 hex）：resolve 回 match==null 时辨因（==磁盘 ⇒ 版本被取代/下架，≠ ⇒ 本地被改动），§3.4
 }
 ```
 读取校验：`version!==1` 或缺 `registry/installedVersion`、缺标识（skill 查 `slug`、**plugin 变体改判 `name`**）、`installedAt` 非有限数 ⇒ 视为无效（重装）。
@@ -311,6 +311,7 @@ sequenceDiagram
     R->>D: SkillDetail（取 latestVersion / tags.latest）
     Note over D: resolvedVersion = 指定版本 ?? latestVersion.version<br/>（latestVersion=null ⇒ 无可装版本，中止）
     D->>G: GET /skills/{slug}/versions/{resolvedVersion}
+    G->>R: 转发
     R->>D: SkillVersionDetail（含 artifact.sha256）
     Note over D: 安全裁决 §3.6：POST security-verdicts [{slug, version:resolvedVersion}]<br/>decision=fail ⇒ 拒装
     D->>G: GET /skills/{slug}/download?version={resolvedVersion}
@@ -358,12 +359,12 @@ interface ResolveResponse {
 判定逻辑（桌面端）：
 ```
 local = fingerprint(skills/{slug})
-if local != origin.fingerprint:                   自安装后本地被改动（离线即知）→ 提示/确认，--force 才覆盖
 { match, latestVersion } = GET /skills/{slug}/resolve?hash=local
 if latestVersion == null:                          无可见版本（全部软删）→ 提示已下架，不动
+elif match == null && !force:                      本地不匹配任何已发布版本 → 提示/确认，仅 --force 覆盖为 latest
+                                                   （借 origin.fingerprint 辨因：存在且 ==fingerprint(磁盘) ⇒ 版本被取代/下架；≠ ⇒ 自安装后被改动）
 elif match && semver.gte(match.version, latestVersion.version):   已最新，不动
-elif match == null && !force:                      本地被改动 / 无匹配 → 提示/确认，--force 才覆盖
-else:                                              有新版 → 原子更新（见下）
+else:                                              有新版（或 --force 覆盖）→ 原子更新（见下）
 ```
 **原子更新**（skill / plugin 通用）：下载到**临时目录** → 取版本详情校验 `artifact.sha256` → 通过后**原子替换**（rename）目标目录 → 重写 origin + lock。任何一步失败 **保留原内容、不删**——杜绝半成品 / 用户内容丢失。
 更新后：`origin.json` 保留原 `registry/installedAt`，更新 `installedVersion` + 重算 `fingerprint`；同步 `lock.json`。
@@ -441,7 +442,7 @@ interface PluginTrust {
 
 > **批量装 plugin**：v1 无 plugin 批量安全端点，逐个 `GET /plugins/{name}/versions/{version}/security` 查询（skill 才有批量 `POST /skills/-/security-verdicts`）。
 
-> **扫描中（pending）策略**（v1 保守）：未完成扫描的版本**不放行**——skill 返回 `decision=fail`（`reasons` 含 `scan:pending`、`security.status=pending`），plugin 返回 `blockedFromDownload=true`（`pending=true`）。桌面端据 `pending` 标志当作「**稍后重试**」展示（对应 §4 的 `423/409`），而非「恶意拒装」。
+> **扫描中（pending）策略**（v1 保守）：未完成扫描的版本**不放行**——skill 返回 `decision=fail`（`reasons` 含 `scan:pending`、`security.status=pending`），plugin 返回 `blockedFromDownload=true`（`pending=true`）。桌面端据 `pending` 标志当作「**稍后重试**」展示，而非「恶意拒装」。两条路径别混：**查裁决端点**恒 `200`、pending 体现在 body（`decision`/`status`）；若**跳过裁决直接下载**未就绪版本，下载端点以 `423/409` 挡（§4）。
 
 ### 3.7 兼容门禁（桌面端解读）
 
@@ -509,6 +510,6 @@ App 二进制自更新**不走 ClawHub**，见 [distribution.md](./distribution.
 - [ ] Plugin 更新：`GET /plugins/{name}` 取最新版本 → 与 `lock.plugins[name].version` 版本比较（非指纹）
 - [ ] pin/unpin/uninstall 本地语义（skill=slug/`skills/`，plugin=name/`plugins/`）
 - [ ] 安全：skill 批量 `security-verdicts`、plugin 单查 `/plugins/{name}/versions/{version}/security`（PluginTrust）；安装前查、安装后定期刷新
-- [ ] compat 字段自检（minAppVersion/minGatewayVersion/pluginApiRange/平台）
+- [ ] compat 自检（minAppVersion/pluginApiRange/平台；minGatewayVersion 由**网关侧**强制）
 - [ ] 错误与状态码处理（§4）
 - [ ] `X-App-Version`/`X-Platform` 头、`Authorization: Bearer`
