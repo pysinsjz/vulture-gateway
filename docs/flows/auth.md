@@ -110,7 +110,7 @@ sequenceDiagram
     Note over D,G: ——登出——
     D->>G: POST /api/v1/auth/logout
     Note over G: 作废本 Device refresh 家族 + bump token_version(Redis)
-    G->>D: ok；桌面清本地 token
+    G->>D: 204；桌面清本地 token
 
     Note over U,G: ——web 端吊销其他设备——
     U->>G: DELETE /api/v1/devices/{id}

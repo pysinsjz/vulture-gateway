@@ -34,11 +34,15 @@
 ```
 <workdir>/
 ├── skills/
-│   └── <slug>/                 # 解压后的 skill/plugin 内容
+│   └── <slug>/                 # 解压后的 skill 内容（被模型读取）
 │       └── .vulture/
-│           └── origin.json     # 每个已装制品一份
+│           └── origin.json     # 每个已装 skill 一份
+├── plugins/
+│   └── <name>/                 # 解压后的 plugin 内容（装进客户端进程的代码/二进制）
+│       └── .vulture/
+│           └── origin.json     # 每个已装 plugin 一份
 └── .vulture/
-    └── lock.json               # workspace 级，全量已装清单 + pin
+    └── lock.json               # workspace 级，全量已装清单（skills + plugins）+ pin
 ```
 
 ### 1.2 状态文件结构
@@ -81,6 +85,8 @@ interface OriginFile {
 }
 ```
 读取校验：`version!==1` 或缺 `registry/slug/installedVersion`、`installedAt` 非有限数 ⇒ 视为无效（重装）。
+
+> **Plugin 变体**：plugin 的 `origin.json` 用 `name` 替代 `slug`、用 `artifactSha256` 替代 `fingerprint`（plugin 走版本比较、无指纹），其余字段一致；落 `plugins/<name>/.vulture/origin.json`。
 
 ### 1.3 指纹算法（**仅 skill** 的更新检测基础，CLI 与服务端逐字一致）
 
@@ -241,6 +247,25 @@ interface SkillVersionDetail {
 }
 ```
 
+**Plugin 详情 `GET /plugins/{name}`**（升级比较用：取 `latestVersion.version`）
+```ts
+interface PluginDetail {
+  package: {
+    name: string;              // 包名（唯一标识）
+    displayName: string;       // 展示名
+    family: "code-plugin" | "bundle-plugin";        // 类型
+    channel: "official" | "community" | "private";  // 渠道
+    isOfficial: boolean;       // 是否官方
+  };
+  latestVersion: {             // 最新版本摘要；无版本时为 null
+    version: string;           // 最新版本号（= distTags.latest）——升级比较用
+    createdAt: number;         // 发布时间
+    changelog: string;         // 更新日志
+  } | null;
+  compatibility?: Compatibility;  // 最新版本兼容性元数据（装前自检，见 §3.7）
+}
+```
+
 **Plugin 指定版本 `GET /plugins/{name}/versions/{version}`**
 ```ts
 interface PluginVersionDetail {
@@ -297,7 +322,7 @@ sequenceDiagram
 - **完整性**：期望 sha256 取自版本详情（skill=`version.artifact.sha256`，plugin=`artifact.sha256`）；下载后对字节算 SHA256 比对，不符则丢弃重试。
 - 预签名 URL **过期 / 403** ⇒ 重新请求本端点换新 URL。
 
-**Plugin 下载**：`GET /plugins/{name}/download?version=`（同样 `302` 跳短时效下载 URL）；npm-pack 形态用 `GET /plugins/{name}/versions/{version}/artifact/download` 取 `.tgz`。
+**Plugin 下载**：按版本详情 `artifact.kind` 选端点——`legacy-zip` 走 `GET /plugins/{name}/download?version=`，`npm-pack` 走 `GET /plugins/{name}/versions/{version}/artifact/download`（取 `.tgz`）；两者同样 `302` 跳短时效下载 URL。
 
 **写状态**（成功安装后）：
 ```ts
@@ -305,6 +330,12 @@ origin.json = { version:1, registry, slug, installedVersion: resolvedVersion, in
 lock.skills[slug] = { version: resolvedVersion, installedAt: Date.now() }   // 保留已有 pinned/pinReason
 ```
 **约束**：目标目录已存在且非 `--force` → 拒绝；`lock.skills[slug].pinned` → 拒绝（要求先 unpin）。
+
+**Plugin 写状态**（成功安装后，解压到 `plugins/<name>/`）：
+```ts
+origin.json = { version:1, registry, name, installedVersion: resolvedVersion, artifactSha256, installedAt: Date.now() }   // plugin 变体：name + artifactSha256，无 fingerprint
+lock.plugins[name] = { version: resolvedVersion, artifactSha256, installedAt: Date.now() }   // 保留已有 pinned/pinReason
+```
 
 ### 3.4 升级检查 & 更新（指纹法）⭐
 
@@ -343,6 +374,7 @@ else:                                  有新版 → 下载 latest .tgz → 校�
 pin <slug> [--reason r]:  lock.skills[slug] = { ...existing, pinned:true, pinReason:r }
 unpin <slug>:             删除 lock.skills[slug] 的 pinned/pinReason
 uninstall <slug>:         rm -rf skills/{slug}  →  delete lock.skills[slug]  →  写回 lock.json
+（plugin 同理：pin/unpin/uninstall 作用于 lock.plugins[name] 与 plugins/<name>/）
 ```
 pinned 效果：`install`/`update <slug>` 拒绝；`update --all` 静默跳过。
 

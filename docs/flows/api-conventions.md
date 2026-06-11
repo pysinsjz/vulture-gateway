@@ -47,6 +47,7 @@
 | `GET /api/v1/skills/{slug}/download?version=` | Bearer | **`302`** | 跳短时效存储 URL（R2 backed） |
 | `POST /api/v1/skills/-/security-verdicts` | Bearer | `200` | 批量安全裁决（1–100） |
 | `GET /api/v1/plugins` | Bearer | `200` `Page<T>` | plugin 列表 |
+| `GET /api/v1/plugins/{name}` | Bearer | `200` | plugin 详情（含 `latestVersion`，升级比较用） |
 | `GET /api/v1/plugins/{name}/versions/{version}` | Bearer | `200` | plugin 指定版本 |
 | `GET /api/v1/plugins/{name}/download?version=` | Bearer | **`302`** | 跳短时效存储 URL |
 | `GET /api/v1/plugins/{name}/versions/{version}/artifact/download` | Bearer | **`302`** | npm-pack `.tgz` |
@@ -79,6 +80,7 @@
 | `410` | 管理 API | `ApiError` | 版本已软删除 | 提示下架、换版本 |
 | `413` | LLM | OpenAI `request_too_large` | 请求体超 25MB | 裁剪附件/分批 |
 | `423`/`409` | 管理 API | `ApiError` | 扫描中 / 质量不达标 | 稍后重试 |
+| `429` | 管理 API | `ApiError`（+`Retry-After`） | 通用限流 | 按 `Retry-After` 退避 |
 | `429` | LLM | OpenAI `usage_window_exceeded`（+`Retry-After`/`X-Window-*-Reset`） | 用量窗口触顶 | 展示恢复时间 |
 | `429` | LLM | OpenAI（其他 code） | 上游供应商限流 | 按 `Retry-After` 退避 |
 | `5xx` | 全部 | `ApiError` / OpenAI | 内部 / 上游不可用 | 退避重试，附 `x-litellm-call-id` |
@@ -93,7 +95,7 @@
 |---|---|---|
 | `Authorization: Bearer <access JWT>` | 所有需登录端点 | access TTL 30min；claims：`sub`/`device_id`/`token_version`/`exp` |
 | `X-App-Version` | skill/plugin、bootstrap、app/latest | 桌面 App 版本（兼容过滤 / 强更判断） |
-| `X-Platform` | skill/plugin、bootstrap、app/latest | 平台架构（如 `darwin-arm64`） |
+| `X-Platform` | skill/plugin、bootstrap、app/latest | 平台架构枚举：`darwin-arm64` / `darwin-x64` / `win32-x64`（扩展按需，双方对齐拼写） |
 | `If-None-Match` | bootstrap 轮询 | 上次 `ETag`，无变化得 `304` |
 
 | 响应头 | 适用 | 说明 |

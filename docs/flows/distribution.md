@@ -40,7 +40,7 @@ sequenceDiagram
 - 响应：
 ```json
 { "latest_version": "1.3.0", "mandatory": false,
-  "download_url": "https://oss/.../VultureSetup-1.3.0.dmg",
+  "download_url": "https://r2.../VultureSetup-1.3.0.dmg",
   "checksum": "sha256:...", "size": 48000000, "release_notes": "..." }
 ```
 - `mandatory` 仅为提示标记；网关**不**在请求层做版本硬门禁（沿用 F1 决策）。

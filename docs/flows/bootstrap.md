@@ -94,7 +94,7 @@ interface BootstrapResponse {
   "min_app_version": "1.2.0",
   "app_update": {
     "latest_version": "1.3.0", "mandatory": false,
-    "download_url": "https://oss/.../VultureSetup-1.3.0.dmg",
+    "download_url": "https://r2.../VultureSetup-1.3.0.dmg",
     "checksum": "sha256:abc...", "size": 48000000, "release_notes": "..."
   },
   "feature_flags": { "mcp_enabled": false },
