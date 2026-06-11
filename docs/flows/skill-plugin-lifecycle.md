@@ -12,7 +12,7 @@
 - **鉴权**：每个请求带 `Authorization: Bearer <accessJWT>`（见 auth.md）。网关鉴权后转发，桌面端不直接接触 ClawHub。
 - **客户端标识头**：每个请求带 `X-App-Version`（桌面 App 版本）、`X-Platform`（如 `darwin-arm64`），用于 plugin 兼容过滤。
 - **权威已装状态**：由桌面端在本地 `.vulture/` 维护（§1）；升级检测靠**内容指纹**而非单纯版本号。
-- **基址**：下文端点路径省略基址，实际为 `https://<gateway>/api/v1/...`。完整端点总表 / 错误矩阵 / 公共头见 [api-conventions.md](./api-conventions.md)。
+- **基址**：下文端点路径省略基址，实际为 `https://<gateway>/api/v1/...`。（少数处如 `/api/v1/telemetry/install` 写了**全路径**，即基址本身、不再叠加。）完整端点总表 / 错误矩阵 / 公共头见 [api-conventions.md](./api-conventions.md)。
 
 **桌面端要实现的能力（总览）**
 1. 维护本地状态文件 `.vulture/lock.json` + 每包 `.vulture/origin.json`（§1）
@@ -345,6 +345,8 @@ origin.json = { version:1, registry, name, installedVersion: resolvedVersion, ar
 lock.plugins[name] = { version: resolvedVersion, artifactSha256, installedAt: Date.now() }   // 保留已有 pinned/pinReason
 ```
 
+> **显式指定版本 ⇒ 自动 pin**：安装时若**显式指定了版本**（而非取 latest），写 `pinned:true` + `pinReason:"显式安装 <version>"`，使 `update`/`update --all` 不会把它顶到 latest；`unpin` 后恢复跟随最新。
+
 ### 3.4 升级检查 & 更新（指纹法）⭐
 
 **`GET /skills/{slug}/resolve?hash={localFingerprint}`** —— 把本地指纹映射到已发布版本
@@ -384,7 +386,8 @@ else:                                              有新版 → 取 PluginVersi
 ```
 pin <slug> [--reason r]:  lock.skills[slug] = { ...existing, pinned:true, pinReason:r }
 unpin <slug>:             删除 lock.skills[slug] 的 pinned/pinReason
-uninstall <slug>:         rm -rf skills/{slug}  →  delete lock.skills[slug]  →  写回 lock.json
+uninstall <slug>:         rm -rf skills/{slug}  →  成功后 delete lock.skills[slug]  →  写回 lock.json
+                          （rm 失败则 lock 不动、可重试；**绝不先删 lock**，避免孤儿目录）
 （plugin 同理：pin/unpin/uninstall 作用于 lock.plugins[name] 与 plugins/<name>/）
 ```
 pinned 效果：`install`/`update <slug>` 拒绝；`update --all` 静默跳过。
@@ -419,7 +422,7 @@ interface SecurityStatus {
   };
 }
 ```
-用途：桌面端**安装前**批量查 `decision`，`fail`/`malicious` 拒装；**安装后**定期刷新已装清单状态（被下架/判恶意则提示卸载）。
+用途：桌面端**安装前**批量查 `decision`，`fail`/`malicious` 拒装；**安装后**定期刷新已装清单状态（被下架/判恶意则提示卸载）。`security.passed`/`status` 仅供展示与日志，**放行一律以 `decision` 为准**。
 
 **Plugin 安装阻断 `GET /plugins/{name}/versions/{version}/security`**
 ```ts
