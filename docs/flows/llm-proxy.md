@@ -18,9 +18,11 @@ litellm proxy ──→ 各模型供应商
 
 ## 1. 对接约定
 
-- **端点**：`POST /v1/chat/completions`（推理）、`GET /v1/models`（模型列表）。后续可按需开 `/v1/embeddings` 等，同样代理形态。
+- **端点**：`POST /v1/chat/completions`（推理）、`GET /v1/models`（模型列表）。后续可按需开 `/v1/embeddings` 等，同样代理形态。全局约定见 [api-conventions.md](./api-conventions.md)。
 - **鉴权**：`Authorization: Bearer <网关 access JWT>`（同其他 API，见 auth.md）。网关换成自己持有的 litellm key 转发——**桌面端永远拿不到 litellm key**。
 - **协议**：请求/响应体为 OpenAI 格式；流式为 SSE（`data: {...}\n\n`，终止 `data: [DONE]`）；多模态走标准 message content（image_url/base64）。
+- **请求体上限**：整体请求体（含多模态 base64）≤ **25MB**；超限 ⇒ `413` + OpenAI 错误体 `code:"request_too_large"`。当前上限经 bootstrap 的 `max_upload_mb` flag 广播，桌面端可预检。
+- **流式超时**：网关 chunk 间空闲 > **120s** 或单请求总时长 > **30min** ⇒ 中断（按已生成部分计费，ADR-0008）。桌面端 SSE 读超时建议 **≥130s**（略大于网关空闲，避免客户端先放弃）。
 - **响应头处理**（网关侧）：
   - **剥除**上游成本敏感头：`x-litellm-response-cost`、`x-litellm-key-spend`、`x-litellm-model-api-base`、`llm_provider-*` 等
   - **保留/透传**：`x-litellm-call-id`（请求追踪用，桌面端报障时附上）
@@ -62,6 +64,7 @@ sequenceDiagram
 
     D->>G: POST /v1/chat/completions (Bearer, stream:true)
     Note over G: 鉴权: JWT 签名 + token_version(Redis)
+    Note over G: 订阅检查: 无有效 Subscription→402（见 §4b）
     Note over G: 预检: 5h 窗 & 周窗（任一已触顶→429, 见 §4）
     Note over G: 注入 stream_options.include_usage=true<br/>替换为 litellm key 转发
     G->>L: 转发请求
@@ -95,6 +98,7 @@ interface ChatRequest {
 ```
 - 终止：`data: [DONE]`
 - 桌面端无需处理计费——usage chunk 透传仅供展示，扣减由网关完成。
+- **容错**：个别上游可能不返回 usage chunk（此时网关内部 tokenizer 估算兜底，§6）；桌面端展示逻辑须按「**usage chunk 可能缺失**」容错，缺失时不展示 token 数即可。
 
 ### 3.4 非流式
 
@@ -129,6 +133,25 @@ interface ChatRequest {
 
 ---
 
+## 4b. 无有效订阅阻断（402）
+
+每个 Plan 都付费、无免费层（CONTEXT）。已登录但**无有效 Subscription**（从未订阅 / 已过期）调 `/v1/*` ⇒ 在窗口预检**之前**返回 `402` + OpenAI 错误体：
+
+```json
+{
+  "error": {
+    "message": "No active subscription. Subscribe to a plan to use the model.",
+    "type": "subscription_error",
+    "code": "no_active_subscription"
+  }
+}
+```
+
+桌面端按 `code: "no_active_subscription"` 跳转订阅流程。
+> 订阅入口 / Plan 数值 / 定价 parked（见记忆），此处只定错误契约。
+
+---
+
 ## 5. 错误处理（桌面端必须处理）
 
 litellm 错误（OpenAI 形态 `{"error":{message,type,param,code}}`）原样透传；网关自身错误同形态。
@@ -137,9 +160,11 @@ litellm 错误（OpenAI 形态 `{"error":{message,type,param,code}}`）原样透
 |---|---|---|---|
 | `401` | 网关 | access token 失效 | 刷新 token / 重登（auth.md），重试 |
 | `403` | 网关 | Device 被吊销 | 重新登录 |
+| `402` + `no_active_subscription` | 网关 | 无有效订阅（未订阅/过期） | 引导用户订阅（见 §4b） |
 | `429` + `usage_window_exceeded` | 网关 | 用量窗口触顶 | 展示恢复时间（`Retry-After`/`X-Window-*-Reset`），到点恢复 |
 | `429`（其他 code） | litellm 透传 | 上游供应商限流 | 按 `Retry-After` 退避重试 |
 | `400` | litellm 透传 | 参数错 / 超上下文窗 / 内容策略 | 提示用户（如裁剪上下文） |
+| `413` + `request_too_large` | 网关 | 请求体超 25MB | 裁剪附件 / 分批，重发 |
 | `408` / `503` | litellm 透传 | 超时 / 上游不可用 | 退避重试 |
 | `500` | 任一 | 内部错误 | 重试一次后报错；附 `x-litellm-call-id` 报障 |
 | 流中断 | — | 网络断开 | 已生成部分按实扣费（ADR-0008）；桌面端可重发 |

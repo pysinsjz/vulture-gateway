@@ -10,7 +10,7 @@
 
 - **ClawHub(fork)** 管的是 agent 运行时加载的 **skill / code-plugin / bundle-plugin**。
 - **宿主 App 本体**（桌面端 Electron 安装包 `.dmg`/`.exe` 等）是**运行时本身**，不属于 ClawHub 任何 family，由网关**原生端点**提供自更新。
-- App 安装包制品存**对象存储 OSS**。
+- App 安装包制品存 **Cloudflare R2（S3 兼容对象存储）**。
 
 ---
 
@@ -20,9 +20,9 @@
 sequenceDiagram
     participant D as 桌面端
     participant G as 网关
-    participant O as 对象存储 OSS
+    participant O as R2(对象存储)
 
-    D->>G: GET /api/v1/app/latest?platform&channel&current_version (Bearer)
+    D->>G: GET /api/v1/app/latest?platform&channel&current_version （公开）
     G->>D: {latest_version, mandatory, download_url, checksum, size, release_notes}
     alt 有新版本
         D->>O: GET download_url
@@ -35,7 +35,7 @@ sequenceDiagram
 
 ## 端点
 
-**`GET /api/v1/app/latest`**（Bearer）—— 宿主 App 自更新检查
+**`GET /api/v1/app/latest`**（公开，无需登录）—— 宿主 App 自更新检查
 - Query：`platform`、`channel`（stable/beta）、`current_version`
 - 响应：
 ```json
@@ -44,14 +44,14 @@ sequenceDiagram
   "checksum": "sha256:...", "size": 48000000, "release_notes": "..." }
 ```
 - `mandatory` 仅为提示标记；网关**不**在请求层做版本硬门禁（沿用 F1 决策）。
-- 安装包直接从内嵌 `download_url`（OSS）下载，校验 `checksum`(SHA256) 后安装。
+- 安装包直接从内嵌 `download_url`（R2）下载，校验 `checksum`(SHA256) 后安装。
 
 ---
 
 ## 关键决策（沿用）
 
 - App 自更新**独立于** Skill/Plugin 分发，不复用 ClawHub
-- 制品存 OSS；下载 URL 内嵌 + checksum(SHA256) 校验
+- 制品存 R2；下载 URL 内嵌 + checksum(SHA256) 校验
 - mandatory 仅提示、网关不做 `426` 版本硬门禁
 
 ## 与启动引导（F2）的关系

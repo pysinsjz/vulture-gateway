@@ -19,7 +19,7 @@ sequenceDiagram
     Note over D: 处理: 强更提示 / flags 生效 / 公告展示 / 校准时钟
     par 各域并行各拉各的
         D->>G: GET /v1/models（D1）
-        D->>G: GET /resolve?slug&hash ×N（技能/插件升级检查）
+        D->>G: GET /skills/{slug}/resolve?hash ×N（skill 指纹升级检查）
     end
     loop 每 30 分钟
         D->>G: GET /api/v1/bootstrap (If-None-Match: <etag>)
@@ -34,6 +34,7 @@ sequenceDiagram
 **刷新策略（已定：启动 + 定时轮询）**：
 - 启动拉一次；之后每 **30 分钟**轮询一次
 - 轮询带 `If-None-Match`（上次响应的 `ETag`），无变化时 `304` 省流量
+- **ETag 按 `(channel, X-App-Version, X-Platform)` 分桶**：响应随这三者变化，切换任一维度旧 ETag 不会误命中 `304`
 - flags / 公告 / 强更标记借此准实时生效，无需长连接
 
 ---
@@ -64,7 +65,7 @@ interface BootstrapResponse {
   app_update: {                  // App 更新摘要；已是最新则为 null
     latest_version: string;      // 最新版本号
     mandatory: boolean;          // 是否强更（仅提示标记）
-    download_url: string;        // 安装包下载地址（OSS）
+    download_url: string;        // 安装包下载地址（R2 预签名/公开 URL）
     checksum: string;            // 安装包 SHA256（"sha256:..."），下载后校验
     size: number;                // 安装包字节数
     release_notes: string;       // 更新说明
@@ -106,6 +107,19 @@ interface BootstrapResponse {
 
 ---
 
+## 2b. 已知 feature_flags 注册表
+
+`feature_flags` 是开放 map，但桌面端要**主动消费**的 flag 必须双方登记 key/类型/默认值（未知 key 一律忽略）。v1 已登记：
+
+| key | 类型 | 默认值 | 含义 |
+|---|---|---|---|
+| `mcp_enabled` | bool | `false` | 是否启用 E 域 MCP 入口（暂缓，留扩展位） |
+| `max_upload_mb` | number | `25` | `/v1/*` 请求体上限（MB）；桌面端据此预检多模态附件大小，与网关 `413` 一致 |
+
+新增 flag 必须在此表登记后，桌面端才消费。
+
+---
+
 ## 3. 桌面端处理规则
 
 1. **强更判断**：`X-App-Version < min_app_version` 或 `app_update.mandatory=true` ⇒ 启动时强提示引导更新（不硬卡，沿用 F1）。
@@ -120,7 +134,7 @@ interface BootstrapResponse {
 |---|---|---|
 | App 更新 | [distribution.md](./distribution.md)（F1） | bootstrap 内嵌摘要 = 启动时顺带一次 F1 检查；用户手动「检查更新」仍走 `GET /api/v1/app/latest` |
 | 模型列表 | [llm-proxy.md](./llm-proxy.md)（D1） | 不含；桌面端启动后自行拉 `/v1/models` |
-| 技能/插件升级 | [skill-plugin-lifecycle.md](./skill-plugin-lifecycle.md) | 不含；自行按 lockfile 逐个 `/resolve` |
+| 技能/插件升级 | [skill-plugin-lifecycle.md](./skill-plugin-lifecycle.md) | 不含；skill 逐个 `/skills/{slug}/resolve`（指纹），plugin 按版本比较 |
 | 登录态 | [auth.md](./auth.md) | bootstrap 不需要登录，先于登录可用 |
 
 ## Park / 待定

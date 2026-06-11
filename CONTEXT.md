@@ -75,7 +75,7 @@ _Avoid_: rate, tariff, cost
 ### Marketplaces
 
 **Skill Hub**:
-The marketplace and upgrade channel for Skills. Backed by a skill registry (nacos) and exposes an API that returns the available skill list.
+The marketplace and upgrade channel for Skills, exposing the available skill list to the Desktop Agent.
 _Avoid_: skill store, skill market
 
 **Plugin Hub**:

@@ -12,7 +12,7 @@
 - **鉴权**：每个请求带 `Authorization: Bearer <accessJWT>`（见 auth.md）。网关鉴权后转发，桌面端不直接接触 ClawHub。
 - **客户端标识头**：每个请求带 `X-App-Version`（桌面 App 版本）、`X-Platform`（如 `darwin-arm64`），用于 plugin 兼容过滤。
 - **权威已装状态**：由桌面端在本地 `.vulture/` 维护（§1）；升级检测靠**内容指纹**而非单纯版本号。
-- **基址**：下文端点路径省略基址，实际为 `https://<gateway>/api/v1/...`。
+- **基址**：下文端点路径省略基址，实际为 `https://<gateway>/api/v1/...`。完整端点总表 / 错误矩阵 / 公共头见 [api-conventions.md](./api-conventions.md)。
 
 **桌面端要实现的能力（总览）**
 1. 维护本地状态文件 `.vulture/lock.json` + 每包 `.vulture/origin.json`（§1）
@@ -47,11 +47,18 @@
 ```ts
 interface LockFile {
   version: 1;                   // lockfile 格式版本，固定为 1
-  skills: Record<string /*slug*/, {   // 已装制品：slug → 安装记录
-    version: string | null;     // 已装版本：archive=semver；github=commit sha；null=跟随 latest
+  skills: Record<string /*slug*/, {   // 已装 skill：slug → 安装记录
+    version: string | null;     // 已装版本：semver；null=跟随 latest
     installedAt: number;        // 安装时间戳（Unix 毫秒）
     pinned?: true;              // 是否锁定版本（仅 pin 后存在）
     pinReason?: string;         // 锁定原因（仅 pin --reason 时存在）
+  }>;
+  plugins?: Record<string /*name*/, {  // 已装 plugin：name → 安装记录（与 skill 分开，按版本号判更新）
+    version: string;            // 已装版本（semver）
+    artifactSha256: string;     // 已装制品归档 sha256（下载完整性 / pinned 防篡改，不参与更新判定）
+    installedAt: number;        // 安装时间戳（Unix 毫秒）
+    pinned?: true;              // 是否锁定版本
+    pinReason?: string;         // 锁定原因
   }>;
 }
 ```
@@ -68,14 +75,16 @@ interface OriginFile {
   version: 1;                  // origin 格式版本，固定为 1
   registry: string;            // 安装来源的 registry 基址（用于校验/重装）
   slug: string;                // 制品唯一标识
-  installedVersion: string;    // 已装版本：semver 或 commit sha
+  installedVersion: string;    // 已装版本（semver）
   installedAt: number;         // 安装时间戳（Unix 毫秒）
   fingerprint?: string;        // 安装后立即算的本地内容指纹（64 位 hex），更新检测用
 }
 ```
 读取校验：`version!==1` 或缺 `registry/slug/installedVersion`、`installedAt` 非有限数 ⇒ 视为无效（重装）。
 
-### 1.3 指纹算法（更新检测的基础，CLI 与服务端逐字一致）
+### 1.3 指纹算法（**仅 skill** 的更新检测基础，CLI 与服务端逐字一致）
+
+> 仅 **skill** 用内容指纹判更新；**plugin** 不算指纹，按版本号判定（§3.4 末「Plugin 升级」）。
 
 ```
 function fingerprint(dir):
@@ -133,6 +142,7 @@ interface Compatibility {
   pluginSdkVersion?: string;        // 构建所用 plugin SDK 版本
   minGatewayVersion?: string;       // 要求的最低网关版本
   minAppVersion?: string;           // 要求的最低桌面 App 版本（我们新增）
+  hostTargets?: string[];           // 兼容的宿主平台/架构（如 darwin-arm64）；与 X-Platform 比对
 }
 ```
 
@@ -171,7 +181,7 @@ interface SkillListItem {
 // 响应: Page<SkillListItem>
 ```
 
-**Plugin 列表 `GET /plugins`**（或 `/packages`、`/code-plugins`、`/bundle-plugins`；query 同上 + `family`、`channel`、`executesCode`）
+**Plugin 列表 `GET /plugins`**（query 同上 + `family`、`channel`、`executesCode`）
 ```ts
 interface PluginListItem {
   name: string;                // 唯一标识（包名）
@@ -223,11 +233,15 @@ interface SkillVersionDetail {
     changelog: string;         // 更新日志
     changelogSource?: "auto" | "user";  // 日志来源：自动生成 / 用户填写
     files: VersionFile[];      // 该版本文件清单（含每文件 sha256）
+    artifact: {                // 下载归档（ZIP）信息
+      sha256: string;          // 归档 SHA256（下载完整性校验用）
+      size: number;            // 字节数
+    };
   };
 }
 ```
 
-**Plugin 指定版本 `GET /packages/{name}/versions/{version}`**
+**Plugin 指定版本 `GET /plugins/{name}/versions/{version}`**
 ```ts
 interface PluginVersionDetail {
   package: {
@@ -260,34 +274,30 @@ sequenceDiagram
     participant D as 桌面端
     participant G as 网关
     participant R as ClawHub(内网)
-    participant S as OSS
+    participant S as 存储(Convex file-storage / R2)
 
     D->>G: GET /skills/{slug} (Bearer, X-App-Version, X-Platform)
     G->>R: 转发
-    R->>D: SkillDetail
+    R->>D: SkillDetail（含版本 artifact.sha256）
     Note over D: 安装前调 §3.6 security-verdicts：decision=fail → 拒装
     Note over D: resolvedVersion = 指定版本 ?? latestVersion.version
-    D->>G: GET /download?slug={slug}&version={v}
-    G->>R: 转发（制品来自 OSS）
-    R-->>D: ZIP 字节 + 完整性头
-    Note over D: 校验 X-...-Sha256 / ETag → 解压到 skills/{slug}（路径防穿越）
+    D->>G: GET /skills/{slug}/download?version={v}
+    Note over G: 鉴权 + 安全门(blockedFromDownload) → 取制品下载 URL
+    G-->>D: 302 Location: 短时效下载 URL
+    D->>S: GET 下载 URL
+    S-->>D: ZIP 字节
+    Note over D: 字节 SHA256 ↔ 版本详情 artifact.sha256 → 解压到 skills/{slug}（路径防穿越）
     Note over D: 算 fingerprint → 写 origin.json + 更新 lock.json[slug]
-    D->>G: POST /api/cli/telemetry/install（§3.8）
+    D->>G: POST /api/v1/telemetry/install（§3.8）
 ```
 
-**下载 `GET /download?slug=&version=`**（缺 version 取 latest）
-- 响应体：`application/zip` 二进制字节
-- 响应头（桌面端用于完整性校验）：
-```
-Content-Type: application/zip
-Content-Disposition: attachment; filename="<slug>-<version>.zip"
-ETag: "sha256:<hex>"
-Digest: sha-256=<base64>
-X-ClawHub-Artifact-Sha256: <hex>
-```
-- 校验：对下载字节算 SHA256，与 `X-ClawHub-Artifact-Sha256` 比对，不符则丢弃重试。
+**下载 `GET /skills/{slug}/download?version=`**（缺 version 取 latest）
+- 鉴权 + 安全门（`blockedFromDownload` / `decision=fail` ⇒ `403`，不签发 URL）通过后，返回 **`302`**，`Location` 头携带**短时效制品下载 URL**（Convex file-storage 签发，R2 backed；见 clawhub-integration.md）。
+- 桌面端跟随 302 **直连存储**下载 `application/zip` 字节，不经网关。
+- **完整性**：期望 sha256 取自版本详情（skill=`version.artifact.sha256`，plugin=`artifact.sha256`）；下载后对字节算 SHA256 比对，不符则丢弃重试。
+- 预签名 URL **过期 / 403** ⇒ 重新请求本端点换新 URL。
 
-**Plugin 下载**：`GET /packages/{name}/download?version=`（同样带完整性头）；npm-pack 形态用 `GET /packages/{name}/versions/{version}/artifact/download` 取 `.tgz`。
+**Plugin 下载**：`GET /plugins/{name}/download?version=`（同样 `302` 跳短时效下载 URL）；npm-pack 形态用 `GET /plugins/{name}/versions/{version}/artifact/download` 取 `.tgz`。
 
 **写状态**（成功安装后）：
 ```ts
@@ -298,7 +308,7 @@ lock.skills[slug] = { version: resolvedVersion, installedAt: Date.now() }   // �
 
 ### 3.4 升级检查 & 更新（指纹法）⭐
 
-**`GET /resolve?slug={slug}&hash={localFingerprint}`** —— 把本地指纹映射到已发布版本
+**`GET /skills/{slug}/resolve?hash={localFingerprint}`** —— 把本地指纹映射到已发布版本
 ```ts
 interface ResolveResponse {
   slug: string;                              // 查询的制品标识
@@ -310,14 +320,22 @@ interface ResolveResponse {
 判定逻辑（桌面端）：
 ```
 local = fingerprint(skills/{slug})
-{ match, latestVersion } = GET /resolve?slug&hash=local
+{ match, latestVersion } = GET /skills/{slug}/resolve?hash=local
 target = latestVersion.version
 if match && semver.gte(match.version, target):   已最新，不动
 elif match == null && !force:                     本地被改动 → 提示/确认，--force 才覆盖
 elif match && semver.lt(match.version, target):   有新版 → rm -rf 目标 → 下载 latest → 解压 → 重写 origin+lock
 ```
 更新后：`origin.json` 保留原 `registry/installedAt`，更新 `installedVersion` + 重算 `fingerprint`；同步 `lock.json`。
-`update --all`：遍历 lock.skills，**跳过 pinned**，逐个执行上述判定。
+
+**Plugin 升级（版本比较，非指纹）**：plugin 是不可变版本化制品，不算内容指纹。
+```
+local = lock.plugins[name].version
+{ latestVersion } = GET /plugins/{name}          // 详情取最新版本（distTags.latest）
+if semver.gte(local, latestVersion):  已最新，不动
+else:                                  有新版 → 下载 latest .tgz → 校验 artifact.sha256 → 安装 → 更新 lock.plugins[name]
+```
+`update --all`：遍历 lock.skills（指纹法）+ lock.plugins（版本比较），两者均**跳过 pinned**。
 
 ### 3.5 pin / unpin / uninstall（纯本地，不触网）
 
@@ -360,7 +378,7 @@ interface SecurityStatus {
 ```
 用途：桌面端**安装前**批量查 `decision`，`fail`/`malicious` 拒装；**安装后**定期刷新已装清单状态（被下架/判恶意则提示卸载）。
 
-**Plugin 安装阻断 `GET /packages/{name}/versions/{version}/security`**
+**Plugin 安装阻断 `GET /plugins/{name}/versions/{version}/security`**
 ```ts
 interface PluginTrust {
   package: { name: string };               // 包名
@@ -379,6 +397,8 @@ interface PluginTrust {
 }
 ```
 
+> **批量装 plugin**：v1 无 plugin 批量安全端点，逐个 `GET /plugins/{name}/versions/{version}/security` 查询（skill 才有批量 `POST /skills/-/security-verdicts`）。
+
 ### 3.7 兼容门禁（桌面端解读）
 
 - 请求带 `X-App-Version` + `X-Platform`，网关据此过滤列表/详情中不兼容的 plugin。
@@ -391,7 +411,7 @@ interface PluginTrust {
 
 ### 3.8 安装遥测（保留）
 
-**`POST /api/cli/telemetry/install`**
+**`POST /api/v1/telemetry/install`**
 ```ts
 // 请求
 interface TelemetryReport {
@@ -436,7 +456,7 @@ App 二进制自更新**不走 ClawHub**，见 [distribution.md](./distribution.
 - [ ] `.vulture/lock.json` + 每包 `.vulture/origin.json` 读写
 - [ ] 指纹算法（§1.3）与服务端逐字一致
 - [ ] 列表/详情/版本拉取（游标分页，无搜索）
-- [ ] 安装：security-verdicts 检查 → 下载 → **完整性头校验** → 解压（路径防穿越）→ 写状态 → 遥测
+- [ ] 安装：security-verdicts 检查 → 下载（302→R2 直连）→ **完整性校验**（字节 sha256 比对版本详情）→ 解压（路径防穿越）→ 写状态 → 遥测
 - [ ] 更新：本地指纹 → `/resolve` → 判定（已最新/本地改动/有新版）
 - [ ] pin/unpin/uninstall 本地语义
 - [ ] 安装前 security-verdicts 批量查、安装后定期刷新

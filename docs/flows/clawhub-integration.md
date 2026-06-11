@@ -4,7 +4,7 @@
 
 注册中心采用「重度 fork + 裁剪」的 ClawHub 取代 nacos。
 
-**已定的整合决策**：① ClawHub **完全去掉身份认证、纯内网访问**，鉴权全部由网关承担；② 制品仓库用**对象存储 OSS**（配自托管 Convex 的 file-storage 后端为 S3 兼容 OSS，下载逻辑不变）；③ **保留**安装遥测 telemetry；④ **不做搜索**（向量与关键字均不做），面向 C 端直接展示 skill/plugin **列表**（排序 + 分页 + filter）；⑤ **skill 下载补 sha256 完整性头**。
+**已定的整合决策**：① ClawHub **完全去掉身份认证、纯内网访问**，鉴权全部由网关承担；② 制品仓库用 **Cloudflare R2（S3 兼容）**，作自托管 Convex 的 file-storage 后端；③ **保留**安装遥测 telemetry；④ **不做搜索**（向量与关键字均不做），面向 C 端直接展示 skill/plugin **列表**（排序 + 分页 + filter）；⑤ **下载经 `302` 跳短时效存储 URL**，完整性 sha256 由版本详情（`artifact.sha256`）提供、客户端比对（不再走网关完整性头）。
 
 ---
 
@@ -15,13 +15,13 @@ flowchart LR
     D["桌面端 Agent"] -->|"Bearer JWT"| G["网关 vulture-gateway"]
     G -->|"内网直连 无鉴权"| R["ClawHub fork 裁剪版<br/>Convex 自托管后端"]
     R --> P[("Postgres<br/>Convex backing store")]
-    R --> S[("对象存储 OSS<br/>制品 artifact")]
+    R --> S[("Cloudflare R2<br/>制品 artifact")]
     G -.->|"Casdoor 身份"| ID["Casdoor IdP"]
 ```
 
-- 桌面端只认网关：所有 `/api/v1/skills|packages|resolve|download...` 经网关鉴权（Casdoor/JWT + Device，见 `auth.md`）后转发给内网 forked ClawHub。
+- 桌面端只认网关：所有 `/api/v1/skills|plugins|.../resolve|.../download` 经网关鉴权（Casdoor/JWT + Device，见 `auth.md`）后转发给内网 forked ClawHub。
 - **ClawHub 自身无鉴权**：去掉 GitHub OAuth / Convex Auth，只接受来自网关的内网调用。
-- **制品存储 = OSS**：推荐把自托管 Convex 的 file-storage 后端配成 S3 兼容 OSS。
+- **制品存储 = R2**：自托管 Convex 的 file-storage 后端配成 Cloudflare R2（S3 兼容）；下载端点 `302` 跳 file-storage 签发的短时效 URL，桌面端直连存储取字节。
 
 ---
 
@@ -54,7 +54,7 @@ v1 **不采用 souls**。
 |------|------|------|
 | **Convex 自托管后端**（`convex-backend`, Rust, Docker） | ClawHub 函数运行时 + 响应式 DB 层 | 最重依赖 |
 | **Postgres**（Convex 专用库） | 自托管 Convex 的后端存储 | 与网关业务库分开；Convex 支持 PG/MySQL/SQLite |
-| **对象存储 OSS（S3 兼容）** | skill/plugin 制品 artifact | 配为 Convex file-storage 后端 |
+| **Cloudflare R2（S3 兼容）** | skill/plugin 制品 artifact | 配为 Convex file-storage 后端 |
 | **Node 运行时**（Convex Node actions） | 跑 `"use node"` 动作（Plugin Inspector `@openclaw/plugin-inspector`） | plugin 兼容性扫描需要 |
 | （可选）Convex Dashboard | 运营查看/管理 | 自托管自带 |
 | （可选）管理前端 | curated 发布运营台 | 纯内网 + CLI 发布可不部署 |
@@ -70,6 +70,6 @@ v1 **不采用 souls**。
 
 ## 6. 仍待跟进（唯一剩余大风险）
 
-**Convex 自托管可行性 + S3 文件存储支持** —— fork 保留 Convex 作后端运行时；需落实 `convex-backend` OSS 自托管 + Postgres backing store，并验证其 file-storage 能否配 S3 兼容 OSS。若不支持，回退方案：改 ClawHub 上传/下载路径直连 OSS。
+**Convex 自托管可行性 + R2 文件存储支持** —— fork 保留 Convex 作后端运行时；需落实 `convex-backend` 自托管 + Postgres backing store，并验证其 file-storage 能否配 **Cloudflare R2（S3 兼容）** 后端。若不支持，回退方案：改 ClawHub 上传/下载路径直连 R2（绕过 Convex file-storage）。
 
 > 裁剪改造的执行用 Claude Code 分阶段进行；删除型阶段采用「就地停用 + 物理删除补丁（`PHYSICAL-DELETE.md`）」，物理删除 + `convex codegen` 合并到 Convex 自托管阶段批量执行。
