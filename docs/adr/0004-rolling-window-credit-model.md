@@ -1,8 +1,8 @@
-# Claude-Code-style rolling-window credit model
+# Claude Code 式滚动窗信用模型
 
-Subscriptions govern usage through two concurrent **rolling windows** — a 5-hour window and a 7-day window — each capping how much Credit a User may consume; hitting either cap blocks LLM use until that window rolls over. Credit is therefore a usage counter scoped to the active windows, **not** a stored, carried-over wallet balance, and it resets as windows roll. Deduction is modelled as a generic, extensible **Billable Event** (priced per rule); v1 implements exactly one event type (LLM usage), with per-model caps designed-for but not yet enabled (a single shared pool in v1). Every Plan is paid — there is no free tier.
+订阅通过两个并发的**滚动窗口**约束用量——一个 5 小时窗和一个 7 天窗——各自限制 User 可消耗的 Credit 量；任一窗触顶即阻断 LLM 使用，直到该窗滚动重置。因此 Credit 是作用于当前窗口的**用量计数**，**而非**可储存、可结转的钱包余额，会随窗口滚动而重置。扣减被建模为通用、可扩展的 **Billable Event**（按各自规则定价）；v1 仅实现一种事件类型（LLM 用量），「按模型分桶」的上限属设计上预留、尚未启用（v1 为单一共享池）。所有 Plan 均为付费——没有免费档。
 
-## Consequences
+## 后续影响
 
-- litellm's calendar-period budgets cannot express this model — see ADR-0005.
-- There is no persistent balance ledger; accounting is window-scoped counters.
+- litellm 的日历周期预算无法表达本模型——见 ADR-0005。
+- 不存在持久化的余额账本；记账是窗口作用域的计数。

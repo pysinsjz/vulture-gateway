@@ -1,0 +1,159 @@
+# LLM 代理流程（D1 模型列表 + D2 流式推理）—— 桌面端对接方案
+
+桌面端 ↔ 网关 的 LLM 调用。机制决策见 ADR-0005（网关代理、自拥记账）、ADR-0008（计量与窗口强制）。
+
+**总原则**：网关对桌面端暴露 **OpenAI 兼容**接口，自身只做「鉴权 + 窗口预检 + 转发 litellm + 计量扣减」的薄层——请求/响应/错误形态全部贴着 litellm（即 OpenAI 惯例），桌面端可直接用任意 OpenAI SDK（`base_url` 指向网关）。
+
+```
+桌面端 (OpenAI SDK, base_url=网关)
+   │ Bearer <网关 access JWT>
+   ▼
+网关  ── 鉴权(JWT+Device) → 窗口预检 → 注入 usage 选项 → 转发
+   │ Bearer <litellm virtual key>（网关持有，桌面端不可见）
+   ▼
+litellm proxy ──→ 各模型供应商
+```
+
+---
+
+## 1. 对接约定
+
+- **端点**：`POST /v1/chat/completions`（推理）、`GET /v1/models`（模型列表）。后续可按需开 `/v1/embeddings` 等，同样代理形态。
+- **鉴权**：`Authorization: Bearer <网关 access JWT>`（同其他 API，见 auth.md）。网关换成自己持有的 litellm key 转发——**桌面端永远拿不到 litellm key**。
+- **协议**：请求/响应体为 OpenAI 格式；流式为 SSE（`data: {...}\n\n`，终止 `data: [DONE]`）；多模态走标准 message content（image_url/base64）。
+- **响应头处理**（网关侧）：
+  - **剥除**上游成本敏感头：`x-litellm-response-cost`、`x-litellm-key-spend`、`x-litellm-model-api-base`、`llm_provider-*` 等
+  - **保留/透传**：`x-litellm-call-id`（请求追踪用，桌面端报障时附上）
+  - **网关自身追加**：触顶阻断时的窗口恢复信息（见 §4）
+
+---
+
+## 2. D1 · 模型列表（代理 litellm）
+
+**`GET /v1/models`**（Bearer）—— 网关直接代理 litellm 的 `/v1/models`，返回 OpenAI 标准形态：
+
+```ts
+interface ModelList {
+  object: "list";
+  data: {
+    id: string;        // 模型名（即 chat/completions 里 model 字段可用值）
+    object: "model";   // 固定 "model"
+    created?: number;  // 创建时间（Unix 秒）
+    owned_by?: string; // 归属方
+  }[];
+}
+```
+
+- litellm 返回什么就是什么（已定：**代理而非网关自有列表**）——litellm `config.yaml` 里配置的 model 列表即桌面端可见列表。
+- 模型的启用/下线通过改 litellm 配置完成，网关零改动。
+
+---
+
+## 3. D2 · 流式推理
+
+### 3.1 时序
+
+```mermaid
+sequenceDiagram
+    participant D as 桌面端
+    participant G as 网关
+    participant L as litellm
+    participant P as 模型供应商
+
+    D->>G: POST /v1/chat/completions (Bearer, stream:true)
+    Note over G: 鉴权: JWT 签名 + token_version(Redis)
+    Note over G: 预检: 5h 窗 & 周窗（任一已触顶→429, 见 §4）
+    Note over G: 注入 stream_options.include_usage=true<br/>替换为 litellm key 转发
+    G->>L: 转发请求
+    L->>P: 路由到供应商
+    P-->>L: 流式 token
+    L-->>G: SSE chunks
+    G-->>D: SSE 透传（剥除成本敏感头）
+    L-->>G: 最后一个 chunk: usage{prompt/completion tokens}
+    G-->>D: 透传 usage chunk + data:[DONE]
+    Note over G: usage × Model Price → Credit<br/>记 Billable Event + ZSET 双窗扣减（乐观后扣）
+```
+
+### 3.2 请求（OpenAI 标准，要点）
+
+```ts
+interface ChatRequest {
+  model: string;                  // 取自 GET /v1/models 的 id
+  messages: Message[];            // OpenAI 标准消息（支持多模态 content）
+  stream?: boolean;               // true=SSE 流式
+  stream_options?: { include_usage?: boolean };  // 网关强制注入 true，桌面端可不传
+  // 其余 OpenAI 参数（temperature/max_tokens/tools/...）原样透传
+}
+```
+
+### 3.3 流式响应（SSE）
+
+- 正常 chunk：`data: {"choices":[{"delta":{"content":"..."}}],...}`
+- **最后一个数据 chunk 带 usage**（因网关强制 `include_usage`）：
+```json
+{ "choices": [], "usage": { "prompt_tokens": 1200, "completion_tokens": 350, "total_tokens": 1550 } }
+```
+- 终止：`data: [DONE]`
+- 桌面端无需处理计费——usage chunk 透传仅供展示，扣减由网关完成。
+
+### 3.4 非流式
+
+`stream:false` 时为普通 JSON 响应，`usage` 在响应体内，计量同理。
+
+---
+
+## 4. 触顶阻断（429，贴 litellm/OpenAI 惯例）
+
+窗口预检失败时，网关返回 **HTTP 429 + OpenAI 兼容错误体**——与 litellm 自身的 RateLimitError 同形态，桌面端 SDK 一套逻辑处理两种来源：
+
+```json
+{
+  "error": {
+    "message": "Usage window cap reached. 5h window resets at 2026-06-11T18:00:00Z.",
+    "type": "rate_limit_error",
+    "code": "usage_window_exceeded"
+  }
+}
+```
+
+附加响应头（网关追加，告知恢复时间）：
+
+| 头 | 含义 |
+|---|---|
+| `Retry-After` | 距最近一个窗口滚动恢复的秒数 |
+| `X-Window-5h-Reset` | 5h 窗恢复时间（Unix 秒；触顶才出现） |
+| `X-Window-Week-Reset` | 周窗恢复时间（Unix 秒；触顶才出现） |
+
+- `code: "usage_window_exceeded"` 用于区分「网关窗口触顶」与上游透传的供应商限流（后者 code 不同）。
+- **没有独立用量查询端点**（已定）：桌面端通过 429 + 上述头得知触顶与恢复时间。
+
+---
+
+## 5. 错误处理（桌面端必须处理）
+
+litellm 错误（OpenAI 形态 `{"error":{message,type,param,code}}`）原样透传；网关自身错误同形态。
+
+| 状态 | 来源 | 含义 | 桌面端处理 |
+|---|---|---|---|
+| `401` | 网关 | access token 失效 | 刷新 token / 重登（auth.md），重试 |
+| `403` | 网关 | Device 被吊销 | 重新登录 |
+| `429` + `usage_window_exceeded` | 网关 | 用量窗口触顶 | 展示恢复时间（`Retry-After`/`X-Window-*-Reset`），到点恢复 |
+| `429`（其他 code） | litellm 透传 | 上游供应商限流 | 按 `Retry-After` 退避重试 |
+| `400` | litellm 透传 | 参数错 / 超上下文窗 / 内容策略 | 提示用户（如裁剪上下文） |
+| `408` / `503` | litellm 透传 | 超时 / 上游不可用 | 退避重试 |
+| `500` | 任一 | 内部错误 | 重试一次后报错；附 `x-litellm-call-id` 报障 |
+| 流中断 | — | 网络断开 | 已生成部分按实扣费（ADR-0008）；桌面端可重发 |
+
+---
+
+## 6. 网关侧计量要点（非桌面端契约，备忘）
+
+- **乐观放行**：预检只看窗口是否已触顶，未触顶即放行，结束后按实际 usage 扣减——单请求可超额（ADR-0008）。
+- **计量来源**：强制 `include_usage` 的最终 usage chunk；缺失时 tokenizer 估算兜底。litellm 的 `x-litellm-response-cost`（美元成本）可作内部对账参考，**不作为扣减依据**（Credit 折算依托 Model Price，待产品文档定价）。
+- **窗口存储**：Redis ZSET（ts → credits），滚动求和 + 原子扣减。
+- 硬错误（无任何 usage）不扣费；部分生成按实扣。
+
+## Park / 待定
+
+- **窗口上限数值与 Model Price 定价**——等产品文档（已 park，见记忆）。
+- `/v1/embeddings`、`/v1/audio/*` 等其他 litellm 端点是否开放——按桌面端需求逐个加。

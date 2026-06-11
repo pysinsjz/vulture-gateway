@@ -1,3 +1,3 @@
-# Domestic payment via gopay SDK, not a payment platform
+# 国内支付用 gopay SDK、而非支付平台
 
-Subscriptions are charged through WeChat Pay + Alipay using the in-process **go-pay/gopay** Go SDK (order creation + callback signature verification); subscription activation / renewal logic stays in the Gateway. We are a single merchant charging for our own subscriptions, so a full self-hosted payment platform (Jeepay, roncoo-pay) — built for multi-merchant / 服务商 models, split payments, and reconciliation consoles — is overkill and would add a separate Java service. If we later let third-party Skill/Plugin authors collect payments with revenue split, revisit this and adopt a platform.
+订阅收款通过微信支付 + 支付宝，使用进程内的 **go-pay/gopay** Go SDK（下单 + 回调验签）；订阅激活 / 续期逻辑留在网关。我们是「单一商户」为自己的订阅收费，所以完整的自托管支付平台（Jeepay、roncoo-pay）——为多商户 / 服务商模式、分账、对账控制台而建——属杀鸡用牛刀，还会引入独立 Java 服务。若将来允许第三方 Skill/Plugin 作者收款并分账，再重新评估、改用平台。
