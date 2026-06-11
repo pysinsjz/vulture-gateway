@@ -59,7 +59,7 @@ interface LockFile {
   }>;
   plugins?: Record<string /*name*/, {  // 已装 plugin：name → 安装记录（与 skill 分开，按版本号判更新）
     version: string;            // 已装版本（semver）
-    artifactSha256: string;     // 已装制品归档 sha256（下载完整性 / pinned 防篡改，不参与更新判定）
+    artifactSha256: string;     // 已装制品归档 sha256（下载完整性校验用；不参与更新判定）
     installedAt: number;        // 安装时间戳（Unix 毫秒）
     pinned?: true;              // 是否锁定版本
     pinReason?: string;         // 锁定原因
@@ -224,7 +224,7 @@ interface SkillDetail {
     createdAt: number;         // 创建时间
     updatedAt: number;         // 更新时间
   };
-  latestVersion: { version: string; createdAt: number; changelog: string } | null;  // 最新版本摘要
+  latestVersion: { version: string; createdAt: number; changelog: string; license?: string } | null;  // 最新版本摘要（字段为列表项 latestVersion 的超集）
   metadata: { os?: string[]; systems?: string[] } | null;   // 平台元数据
 }
 ```
@@ -330,7 +330,7 @@ sequenceDiagram
 - **完整性**：期望 sha256 取自版本详情（skill=`version.artifact.sha256`，plugin=`artifact.sha256`）；下载后对字节算 SHA256 比对，不符则丢弃重试。
 - 预签名 URL **过期 / 403** ⇒ 重新请求本端点换新 URL。
 
-**Plugin 下载**：按版本详情 `artifact.kind` 选端点——`legacy-zip` 走 `GET /plugins/{name}/download?version=`，`npm-pack` 走 `GET /plugins/{name}/versions/{version}/artifact/download`（取 `.tgz`）；两者同样 `302` 跳短时效下载 URL。
+**Plugin 下载**：下载前先 `GET /plugins/{name}/versions/{version}/security`，`blockedFromDownload=true` 即拒装（与 skill 的 security-verdicts 对称）。按版本详情 `artifact.kind` 选端点——`legacy-zip` 走 `GET /plugins/{name}/download?version=`，`npm-pack` 走 `GET /plugins/{name}/versions/{version}/artifact/download`（取 `.tgz`）；两者同样 `302` 跳短时效下载 URL。
 
 **写状态**（成功安装后）：
 ```ts
@@ -375,7 +375,7 @@ local = lock.plugins[name].version
 { latestVersion } = GET /plugins/{name}            // PluginDetail，latestVersion: {version,…} | null
 if latestVersion == null:                          无可见版本 → 不动
 elif semver.gte(local, latestVersion.version):     已最新，不动
-else:                                              有新版 → 原子更新（同上）：下载 latest .tgz 到临时 → 校验 artifact.sha256 → 原子替换 plugins/<name> → 更新 lock.plugins[name]
+else:                                              有新版 → 取 PluginVersionDetail 拿 artifact.sha256（PluginDetail 不含）→ 原子更新（同上）：下载 .tgz 到临时 → 校验 sha256 → 原子替换 plugins/<name> → 更新 lock.plugins[name]
 ```
 `update --all`：遍历 lock.skills（指纹法）+ lock.plugins（版本比较），两者均**跳过 pinned**。
 
@@ -489,12 +489,12 @@ App 二进制自更新**不走 ClawHub**，见 [distribution.md](./distribution.
 | 状态 | 含义 | 桌面端处理 |
 |---|---|---|
 | `401` | access token 失效 | 触发刷新/重登（见 auth.md），重试 |
-| `403` | Device 被吊销 / 无权限 | 重新登录 |
+| `403`（`error`=`device_revoked`/`unauthorized`） | Device 被吊销 / 无权限 | 重新登录 |
+| `403`（`error`=`blocked`/`scan:*`） | 安全阻断：`decision=fail` / `blockedFromDownload` | **拒装、不要重登**——按 `ApiError.error` 分流，否则会重登死循环 + 误报原因 |
 | `400` | 参数错（如 resolve 的 hash 非 64hex） | 修正请求 |
 | `404` | slug/package 不存在 | 提示不存在 |
 | `410` | 版本已软删除 | 提示已下架，触发卸载/换版本 |
-| `423`/`409` | 扫描中 / 质量不达标（owner 可见态） | 提示稍后重试 |
-| 安全阻断 | security-verdicts `decision=fail` / `trust.blockedFromDownload` | **拒装** |
+| `423`/`409` | 扫描中（pending）/ 质量不达标（owner 可见态） | 提示稍后重试（区别于 malicious 的 `403` 永久阻断） |
 | `429` | 限流（带 `Retry-After`） | 退避重试 |
 | 完整性校验失败 | sha256 不符 | 丢弃重下 |
 

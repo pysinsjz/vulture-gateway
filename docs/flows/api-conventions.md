@@ -75,7 +75,8 @@
 | `400` | 全部 | `ApiError` / OpenAI | 参数错（如 hash 非 64hex、超上下文窗） | 修正请求 |
 | `401` | 全部 | `ApiError` / OAuth `invalid_grant` / OpenAI | access 失效 / RT 复用 | 刷新（single-flight）或重登 |
 | `402` | LLM | OpenAI `no_active_subscription` | 无有效订阅 | 引导订阅 |
-| `403` | 管理 / LLM | `ApiError` / OpenAI | Device 被吊销 / `blockedFromDownload` | 重登 / 拒装 |
+| `403`（`error`=`device_revoked`/`unauthorized`） | 管理 / LLM | `ApiError` / OpenAI | Device 被吊销 / 无权限 | 重登 |
+| `403`（`error`=`blocked`/`scan:*`） | 管理 API | `ApiError` | 安全阻断（`decision=fail`/`blockedFromDownload`） | **拒装、不要重登**（按 `error` 分流，避免死循环） |
 | `404` | 管理 API | `ApiError` | slug/name 不存在 | 提示不存在 |
 | `410` | 管理 API | `ApiError` | 版本已软删除 | 提示下架、换版本 |
 | `413` | LLM | OpenAI `request_too_large` | 请求体超 25MB | 裁剪附件/分批 |
