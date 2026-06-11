@@ -67,10 +67,15 @@ interface LockFile {
 }
 ```
 ```json
-{ "version": 1, "skills": {
-  "gifgrep": { "version": "1.2.0", "installedAt": 1733700000000 },
-  "tariff-calc": { "version": "2.1.0", "installedAt": 1733700001000, "pinned": true, "pinReason": "锁定到 2.1.0" }
-}}
+{ "version": 1,
+  "skills": {
+    "gifgrep": { "version": "1.2.0", "installedAt": 1733700000000 },
+    "tariff-calc": { "version": "2.1.0", "installedAt": 1733700001000, "pinned": true, "pinReason": "锁定到 2.1.0" }
+  },
+  "plugins": {
+    "@vulture/notion-sync": { "version": "0.4.1", "artifactSha256": "ab12…", "installedAt": 1733700002000 }
+  }
+}
 ```
 
 **`<slug>/.vulture/origin.json`**（每个已装制品一份）
@@ -84,7 +89,7 @@ interface OriginFile {
   fingerprint?: string;        // 安装后立即算的本地内容指纹（64 位 hex），更新检测用
 }
 ```
-读取校验：`version!==1` 或缺 `registry/slug/installedVersion`、`installedAt` 非有限数 ⇒ 视为无效（重装）。
+读取校验：`version!==1` 或缺 `registry/installedVersion`、缺标识（skill 查 `slug`、**plugin 变体改判 `name`**）、`installedAt` 非有限数 ⇒ 视为无效（重装）。
 
 > **Plugin 变体**：plugin 的 `origin.json` 用 `name` 替代 `slug`、用 `artifactSha256` 替代 `fingerprint`（plugin 走版本比较、无指纹），其余字段一致；落 `plugins/<name>/.vulture/origin.json`。
 
@@ -488,10 +493,11 @@ App 二进制自更新**不走 ClawHub**，见 [distribution.md](./distribution.
 - [ ] `.vulture/lock.json` + 每包 `.vulture/origin.json` 读写
 - [ ] 指纹算法（§1.3）与服务端逐字一致
 - [ ] 列表/详情/版本拉取（游标分页，无搜索）
-- [ ] 安装：security-verdicts 检查 → 下载（302→R2 直连）→ **完整性校验**（字节 sha256 比对版本详情）→ 解压（路径防穿越）→ 写状态 → 遥测
-- [ ] 更新：本地指纹 → `/resolve` → 判定（已最新/本地改动/有新版）
-- [ ] pin/unpin/uninstall 本地语义
-- [ ] 安装前 security-verdicts 批量查、安装后定期刷新
+- [ ] 安装：security-verdicts 检查 → 下载（302→存储直连）→ **完整性校验**（字节 sha256 比对版本详情）→ 解压（路径防穿越）→ 写状态 → 遥测
+- [ ] Skill 更新：本地指纹 → `/skills/{slug}/resolve` → 判定（已最新/本地改动/有新版）
+- [ ] Plugin 更新：`GET /plugins/{name}` 取最新版本 → 与 `lock.plugins[name].version` 版本比较（非指纹）
+- [ ] pin/unpin/uninstall 本地语义（skill=slug/`skills/`，plugin=name/`plugins/`）
+- [ ] 安全：skill 批量 `security-verdicts`、plugin 单查 `/plugins/{name}/versions/{version}/security`（PluginTrust）；安装前查、安装后定期刷新
 - [ ] compat 字段自检（minAppVersion/minGatewayVersion/pluginApiRange/平台）
 - [ ] 错误与状态码处理（§4）
 - [ ] `X-App-Version`/`X-Platform` 头、`Authorization: Bearer`
