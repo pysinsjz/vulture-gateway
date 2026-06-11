@@ -2,7 +2,7 @@
 
 面向**桌面端 Agent 开发**：完整生命周期 + 每一步的交互数据结构。桌面端统一对接网关 `/api/v1/*`，注册中心（fork 裁剪版 ClawHub）在网关后内网、桌面端无感。
 
-> 注册中心后端侧（fork 裁剪范围、自托管、Convex/OSS）见 [clawhub-integration.md](./clawhub-integration.md)；鉴权见 [auth.md](./auth.md)；宿主 App 自更新见 [distribution.md](./distribution.md)。
+> 注册中心后端侧（fork 裁剪范围、自托管、Convex/R2）见 [clawhub-integration.md](./clawhub-integration.md)；鉴权见 [auth.md](./auth.md)；宿主 App 自更新见 [distribution.md](./distribution.md)。
 
 ---
 

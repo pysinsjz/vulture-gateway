@@ -1,8 +1,6 @@
 # 宿主 App 自更新流程（F1）
 
-> **Skill/Plugin 的分发与完整生命周期见 [skill-plugin-lifecycle.md](./skill-plugin-lifecycle.md)**（基于 fork 裁剪版 ClawHub，ADR-0006）。原 B1–B3（技能/插件市场浏览·升级检查·下载）已被其取代（指纹更新 `/resolve` + lockfile/origin + ClawHub 端点 + OSS），不再在本文维护。
->
-> 本文只负责**桌面端宿主 App 二进制自身的更新**——它不是 skill/plugin/package，不归 ClawHub 管，由网关原生提供。
+> 本文只负责**桌面端宿主 App 二进制自身的更新**——它不是 skill/plugin/package，不归 ClawHub 管，由网关原生提供。Skill/Plugin 的分发与生命周期见 [skill-plugin-lifecycle.md](./skill-plugin-lifecycle.md)。
 
 ---
 
