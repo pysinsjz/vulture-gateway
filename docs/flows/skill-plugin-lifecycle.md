@@ -52,7 +52,7 @@
 interface LockFile {
   version: 1;                   // lockfile 格式版本，固定为 1
   skills: Record<string /*slug*/, {   // 已装 skill：slug → 安装记录
-    version: string | null;     // 已装版本：semver；null=跟随 latest
+    version: string;            // 已装版本（semver；安装流程总写具体版本）
     installedAt: number;        // 安装时间戳（Unix 毫秒）
     pinned?: true;              // 是否锁定版本（仅 pin 后存在）
     pinReason?: string;         // 锁定原因（仅 pin --reason 时存在）
@@ -86,7 +86,7 @@ interface OriginFile {
   slug: string;                // 制品唯一标识
   installedVersion: string;    // 已装版本（semver）
   installedAt: number;         // 安装时间戳（Unix 毫秒）
-  fingerprint?: string;        // 安装后立即算的本地内容指纹（64 位 hex），更新检测用
+  fingerprint?: string;        // 安装时的内容指纹基线（64 位 hex）：fingerprint(磁盘)≠它 ⇒ 自安装后被改动（离线即知，§3.4）
 }
 ```
 读取校验：`version!==1` 或缺 `registry/installedVersion`、缺标识（skill 查 `slug`、**plugin 变体改判 `name`**）、`installedAt` 非有限数 ⇒ 视为无效（重装）。
@@ -308,21 +308,23 @@ sequenceDiagram
 
     D->>G: GET /skills/{slug} (Bearer, X-App-Version, X-Platform)
     G->>R: 转发
-    R->>D: SkillDetail（含版本 artifact.sha256）
-    Note over D: 安装前调 §3.6 security-verdicts：decision=fail → 拒装
-    Note over D: resolvedVersion = 指定版本 ?? latestVersion.version
-    D->>G: GET /skills/{slug}/download?version={v}
-    Note over G: 鉴权 + 安全门(blockedFromDownload) → 取制品下载 URL
+    R->>D: SkillDetail（取 latestVersion / tags.latest）
+    Note over D: resolvedVersion = 指定版本 ?? latestVersion.version<br/>（latestVersion=null ⇒ 无可装版本，中止）
+    D->>G: GET /skills/{slug}/versions/{resolvedVersion}
+    R->>D: SkillVersionDetail（含 artifact.sha256）
+    Note over D: 安全裁决 §3.6：POST security-verdicts [{slug, version:resolvedVersion}]<br/>decision=fail ⇒ 拒装
+    D->>G: GET /skills/{slug}/download?version={resolvedVersion}
+    Note over G: 鉴权 + 安全门(skill 看 decision) → 取制品下载 URL
     G-->>D: 302 Location: 短时效下载 URL
     D->>S: GET 下载 URL
     S-->>D: ZIP 字节
-    Note over D: 字节 SHA256 ↔ 版本详情 artifact.sha256 → 解压到 skills/{slug}（路径防穿越）
-    Note over D: 算 fingerprint → 写 origin.json + 更新 lock.json[slug]
+    Note over D: 字节 SHA256 ↔ SkillVersionDetail.artifact.sha256 → 解压到 skills/{slug}（路径防穿越）
+    Note over D: 算 fingerprint → 写 origin.json + 更新 lock.skills[slug]
     D->>G: POST /api/v1/telemetry/install（§3.8）
 ```
 
 **下载 `GET /skills/{slug}/download?version=`**（缺 version 取 latest）
-- 鉴权 + 安全门（`blockedFromDownload` / `decision=fail` ⇒ `403`，不签发 URL）通过后，返回 **`302`**，`Location` 头携带**短时效制品下载 URL**（Convex file-storage 签发，R2 backed；见 clawhub-integration.md）。
+- 鉴权 + 安全门（**skill** 看 security-verdicts `decision=fail`、**plugin** 看 `PluginTrust.blockedFromDownload`，命中 ⇒ `403`、不签发 URL）通过后，返回 **`302`**，`Location` 头携带**短时效制品下载 URL**（Convex file-storage 签发，R2 backed；见 clawhub-integration.md）。
 - 桌面端跟随 302 **直连存储**下载 `application/zip` 字节，不经网关。
 - **完整性**：期望 sha256 取自版本详情（skill=`version.artifact.sha256`，plugin=`artifact.sha256`）；下载后对字节算 SHA256 比对，不符则丢弃重试。
 - 预签名 URL **过期 / 403** ⇒ 重新请求本端点换新 URL。
@@ -356,20 +358,23 @@ interface ResolveResponse {
 判定逻辑（桌面端）：
 ```
 local = fingerprint(skills/{slug})
+if local != origin.fingerprint:                   自安装后本地被改动（离线即知）→ 提示/确认，--force 才覆盖
 { match, latestVersion } = GET /skills/{slug}/resolve?hash=local
-target = latestVersion.version
-if match && semver.gte(match.version, target):   已最新，不动
-elif match == null && !force:                     本地被改动 → 提示/确认，--force 才覆盖
-elif match && semver.lt(match.version, target):   有新版 → rm -rf 目标 → 下载 latest → 解压 → 重写 origin+lock
+if latestVersion == null:                          无可见版本（全部软删）→ 提示已下架，不动
+elif match && semver.gte(match.version, latestVersion.version):   已最新，不动
+elif match == null && !force:                      本地被改动 / 无匹配 → 提示/确认，--force 才覆盖
+else:                                              有新版 → 原子更新（见下）
 ```
+**原子更新**（skill / plugin 通用）：下载到**临时目录** → 取版本详情校验 `artifact.sha256` → 通过后**原子替换**（rename）目标目录 → 重写 origin + lock。任何一步失败 **保留原内容、不删**——杜绝半成品 / 用户内容丢失。
 更新后：`origin.json` 保留原 `registry/installedAt`，更新 `installedVersion` + 重算 `fingerprint`；同步 `lock.json`。
 
 **Plugin 升级（版本比较，非指纹）**：plugin 是不可变版本化制品，不算内容指纹。
 ```
 local = lock.plugins[name].version
-{ latestVersion } = GET /plugins/{name}          // 详情取最新版本（distTags.latest）
-if semver.gte(local, latestVersion):  已最新，不动
-else:                                  有新版 → 下载 latest .tgz → 校验 artifact.sha256 → 安装 → 更新 lock.plugins[name]
+{ latestVersion } = GET /plugins/{name}            // PluginDetail，latestVersion: {version,…} | null
+if latestVersion == null:                          无可见版本 → 不动
+elif semver.gte(local, latestVersion.version):     已最新，不动
+else:                                              有新版 → 原子更新（同上）：下载 latest .tgz 到临时 → 校验 artifact.sha256 → 原子替换 plugins/<name> → 更新 lock.plugins[name]
 ```
 `update --all`：遍历 lock.skills（指纹法）+ lock.plugins（版本比较），两者均**跳过 pinned**。
 
@@ -436,12 +441,14 @@ interface PluginTrust {
 
 > **批量装 plugin**：v1 无 plugin 批量安全端点，逐个 `GET /plugins/{name}/versions/{version}/security` 查询（skill 才有批量 `POST /skills/-/security-verdicts`）。
 
+> **扫描中（pending）策略**（v1 保守）：未完成扫描的版本**不放行**——skill 返回 `decision=fail`（`reasons` 含 `scan:pending`、`security.status=pending`），plugin 返回 `blockedFromDownload=true`（`pending=true`）。桌面端据 `pending` 标志当作「**稍后重试**」展示（对应 §4 的 `423/409`），而非「恶意拒装」。
+
 ### 3.7 兼容门禁（桌面端解读）
 
 - 请求带 `X-App-Version` + `X-Platform`，网关据此过滤列表/详情中不兼容的 plugin。
 - plugin 详情的 `compatibility` 字段桌面端**安装前自检**：
   - `minAppVersion` > 当前 App 版本 ⇒ 不可装，提示升级 App
-  - `minGatewayVersion` > 网关版本 ⇒ 不可装
+  - `minGatewayVersion`：由**网关侧**强制（网关知道自身版本，据此过滤/拒绝不兼容 plugin）；客户端如需预检可用 bootstrap 的 `gateway_version`
   - `pluginApiRange` 不含当前 plugin API 版本 ⇒ 不可装
   - `hostTargets` / `X-Platform` 不匹配 ⇒ 不在列表出现
 - skill 的 `metadata.os/systems` 同理做平台过滤。
@@ -455,8 +462,12 @@ interface TelemetryReport {
   roots: {                       // 一个或多个安装根
     rootId: string;              // 安装根标识 = SHA256(绝对路径)，隐私哈希、不暴露真实路径
     label: string;               // 脱敏的可读标签
-    skills: {                    // 该根下已装清单
+    skills: {                    // 该根下已装 skill
       slug: string;              // 制品标识
+      version: string;           // 已装版本
+    }[];
+    plugins: {                   // 该根下已装 plugin（驱动 plugin 列表 installsCurrent）
+      name: string;              // 包名
       version: string;           // 已装版本
     }[];
   }[];

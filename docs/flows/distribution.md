@@ -1,13 +1,12 @@
 # 宿主 App 自更新流程（F1）
 
-> 本文只负责**桌面端宿主 App 二进制自身的更新**——它不是 skill/plugin/package，不归 ClawHub 管，由网关原生提供。Skill/Plugin 的分发与生命周期见 [skill-plugin-lifecycle.md](./skill-plugin-lifecycle.md)。
+> 本文只负责**桌面端宿主 App 二进制自身的更新**
 
 ---
 
 ## 范围与边界
 
-- **ClawHub(fork)** 管的是 agent 运行时加载的 **skill / code-plugin / bundle-plugin**。
-- **宿主 App 本体**（桌面端 Electron 安装包 `.dmg`/`.exe` 等）是**运行时本身**，不属于 ClawHub 任何 family，由网关**原生端点**提供自更新。
+- **宿主 App 本体**（桌面端 Electron 安装包 `.dmg`/`.exe` 等）是**运行时本身**，由网关**原生端点**提供自更新。
 - App 安装包制品存 **Cloudflare R2（S3 兼容对象存储）**。
 
 ---
@@ -48,7 +47,6 @@ sequenceDiagram
 
 ## 关键决策（沿用）
 
-- App 自更新**独立于** Skill/Plugin 分发，不复用 ClawHub
 - 制品存 R2；下载 URL 内嵌 + checksum(SHA256) 校验
 - mandatory 仅提示、网关不做 `426` 版本硬门禁
 
