@@ -55,3 +55,39 @@ func TestUserDAO_ResolveOrCreateBySubject_Integration(t *testing.T) {
 		t.Errorf("应解析到同一 User: %+v vs %+v", u2, u1)
 	}
 }
+
+func TestDeviceAndRefreshDAO_Create_Integration(t *testing.T) {
+	dsn := os.Getenv("VG_TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("未设置 VG_TEST_POSTGRES_DSN，跳过 DAO 集成测试")
+	}
+	gdb, err := db.NewPostgres(config.PostgresConfig{DSN: dsn})
+	if err != nil {
+		t.Fatalf("连接 Postgres 失败: %v", err)
+	}
+	if err := db.AutoMigrate(gdb); err != nil {
+		t.Fatalf("迁移失败: %v", err)
+	}
+	ctx := context.Background()
+
+	deviceDAO := NewDeviceDAO(gdb)
+	refreshDAO := NewRefreshTokenDAO(gdb)
+
+	device := &model.Device{UUID: "dev_itest", UserUUID: "usr_itest", Name: "iMac", OS: "macOS", AppVersion: "1.0.0", LastActiveAt: 1}
+	gdb.Where("uuid = ?", device.UUID).Delete(&model.Device{})
+	if err := deviceDAO.Create(ctx, device); err != nil {
+		t.Fatalf("创建 Device 失败: %v", err)
+	}
+	if device.ID == 0 {
+		t.Error("Device.ID 应回填")
+	}
+
+	rt := &model.RefreshToken{TokenHash: "itest-hash", FamilyID: "rtf_itest", DeviceUUID: device.UUID, UserUUID: "usr_itest", ExpiresAt: 1 << 40}
+	gdb.Where("token_hash = ?", rt.TokenHash).Delete(&model.RefreshToken{})
+	if err := refreshDAO.Create(ctx, rt); err != nil {
+		t.Fatalf("创建 refresh token 失败: %v", err)
+	}
+	if rt.ID == 0 {
+		t.Error("RefreshToken.ID 应回填")
+	}
+}

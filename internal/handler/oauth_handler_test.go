@@ -12,9 +12,12 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/pysinsjz/vulture-gateway/config"
 	"github.com/pysinsjz/vulture-gateway/internal/auth"
 	"github.com/pysinsjz/vulture-gateway/internal/handler"
+	"github.com/pysinsjz/vulture-gateway/internal/middleware"
 	"github.com/pysinsjz/vulture-gateway/internal/model"
+	"github.com/pysinsjz/vulture-gateway/internal/service"
 )
 
 // fakeUpstream 受控上游：AuthorizeURL 把 linkedState 放进 query 便于测试提取；Exchange 派生 subject。
@@ -55,12 +58,39 @@ func (r *fakeUserRepo) ResolveOrCreateBySubject(_ context.Context, subject strin
 	return u, nil
 }
 
-type oauthFixture struct {
-	engine   *gin.Engine
-	upstream *fakeUpstream
-	users    *fakeUserRepo
-	gwcodes  *auth.GWCodeStore
+// fakeTransactor 直接执行回调，不启真实事务（测试用）。
+type fakeTransactor struct{}
+
+func (fakeTransactor) WithinTx(ctx context.Context, fn func(ctx context.Context) error) error {
+	return fn(ctx)
 }
+
+// fakeDeviceRepo 内存 Device 仓。
+type fakeDeviceRepo struct{ created []*model.Device }
+
+func (r *fakeDeviceRepo) Create(_ context.Context, d *model.Device) error {
+	r.created = append(r.created, d)
+	return nil
+}
+
+// fakeRefreshRepo 内存 refresh token 仓。
+type fakeRefreshRepo struct{ created []*model.RefreshToken }
+
+func (r *fakeRefreshRepo) Create(_ context.Context, rt *model.RefreshToken) error {
+	r.created = append(r.created, rt)
+	return nil
+}
+
+type oauthFixture struct {
+	engine    *gin.Engine
+	upstream  *fakeUpstream
+	users     *fakeUserRepo
+	gwcodes   *auth.GWCodeStore
+	devices   *fakeDeviceRepo
+	refreshes *fakeRefreshRepo
+}
+
+const fixtureSecret = "oauth-fixture-secret"
 
 func newOAuthFixture(t *testing.T) *oauthFixture {
 	t.Helper()
@@ -75,15 +105,28 @@ func newOAuthFixture(t *testing.T) *oauthFixture {
 
 	up := &fakeUpstream{}
 	users := newFakeUserRepo()
+	devices := &fakeDeviceRepo{}
+	refreshes := &fakeRefreshRepo{}
 	authzStore := auth.NewAuthzStore(rdb, 10*time.Minute)
 	gwStore := auth.NewGWCodeStore(rdb, 60*time.Second)
-	h := handler.NewOAuthHandler(up, authzStore, gwStore, users, "vulture-desktop")
+
+	signer := auth.NewSigner(config.JWTConfig{Secret: fixtureSecret, Issuer: "vulture-gateway", AccessTTL: 30 * time.Minute})
+	tvs := auth.NewTokenVersionStore(rdb)
+	svc := service.NewOAuthService(fakeTransactor{}, devices, refreshes, gwStore, tvs, signer, 1440*time.Hour)
+
+	h := handler.NewOAuthHandler(up, authzStore, gwStore, users, svc, "vulture-desktop")
 
 	r := gin.New()
 	r.GET("/oauth/authorize", h.Authorize)
 	r.GET("/oauth/callback/casdoor", h.Callback)
+	r.POST("/oauth/token", h.Token)
+	// 受保护探针，用于验证换得的 access JWT 能跑通 JWTAuth（首次登录闭环）。
+	probe := handler.NewProbeHandler()
+	v1 := r.Group("/api/v1")
+	v1.Use(middleware.JWTAuth(signer, tvs, nil))
+	v1.GET("/whoami", probe.Whoami)
 
-	return &oauthFixture{engine: r, upstream: up, users: users, gwcodes: gwStore}
+	return &oauthFixture{engine: r, upstream: up, users: users, gwcodes: gwStore, devices: devices, refreshes: refreshes}
 }
 
 func (f *oauthFixture) get(t *testing.T, path string) *httptest.ResponseRecorder {

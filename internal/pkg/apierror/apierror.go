@@ -37,9 +37,12 @@ type OAuthError struct {
 
 // 常用 OAuth 错误码（RFC 6749）。
 const (
-	OAuthInvalidRequest     = "invalid_request"
-	OAuthUnauthorizedClient = "unauthorized_client"
-	OAuthServerError        = "server_error"
+	OAuthInvalidRequest       = "invalid_request"
+	OAuthUnauthorizedClient   = "unauthorized_client"
+	OAuthInvalidClient        = "invalid_client"
+	OAuthInvalidGrant         = "invalid_grant"
+	OAuthUnsupportedGrantType = "unsupported_grant_type"
+	OAuthServerError          = "server_error"
 )
 
 // AbortOAuth 写入状态码 + OAuthError 并中止 gin 处理链。

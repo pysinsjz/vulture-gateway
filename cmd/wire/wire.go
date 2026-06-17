@@ -15,6 +15,7 @@ import (
 	"github.com/pysinsjz/vulture-gateway/internal/handler"
 	"github.com/pysinsjz/vulture-gateway/internal/middleware"
 	"github.com/pysinsjz/vulture-gateway/internal/redisx"
+	"github.com/pysinsjz/vulture-gateway/internal/service"
 	"github.com/pysinsjz/vulture-gateway/router"
 )
 
@@ -44,13 +45,18 @@ func WireApp(cfg *config.Configuration) (*App, error) {
 	authzStore := auth.NewAuthzStore(rdb, cfg.OAuth.AuthzTTL)
 	gwCodeStore := auth.NewGWCodeStore(rdb, cfg.OAuth.GWCodeTTL)
 
+	transactor := dao.NewTransactor(gdb)
 	userDAO := dao.NewUserDAO(gdb)
+	deviceDAO := dao.NewDeviceDAO(gdb)
+	refreshDAO := dao.NewRefreshTokenDAO(gdb)
+
+	oauthService := service.NewOAuthService(transactor, deviceDAO, refreshDAO, gwCodeStore, tvs, signer, cfg.OAuth.RefreshTTL)
 
 	jwtAuth := middleware.JWTAuth(signer, tvs, middleware.DefaultPublicPaths)
 
 	probeHandler := handler.NewProbeHandler()
 	scaffoldHandler := handler.NewScaffoldHandler(signer, tvs)
-	oauthHandler := handler.NewOAuthHandler(upstream, authzStore, gwCodeStore, userDAO, cfg.OAuth.ClientID)
+	oauthHandler := handler.NewOAuthHandler(upstream, authzStore, gwCodeStore, userDAO, oauthService, cfg.OAuth.ClientID)
 
 	engine := router.NewRouter(cfg, probeHandler, scaffoldHandler, oauthHandler, jwtAuth)
 

@@ -23,6 +23,7 @@ oauth:
   gateway_base_url: "http://127.0.0.1:8080"
   gw_code_ttl: "60s"
   authz_ttl: "10m"
+  refresh_ttl: "1440h" # 60 天
   upstream:
     # stub：内置桩上游，#11 本地联调用；真实 Casdoor 待 #10 部署后切 oidc。
     mode: "stub"

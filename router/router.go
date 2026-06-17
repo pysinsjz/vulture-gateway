@@ -36,6 +36,7 @@ func NewRouter(
 	{
 		oauthGroup.GET("/authorize", oauth.Authorize)
 		oauthGroup.GET("/callback/casdoor", oauth.Callback)
+		oauthGroup.POST("/token", oauth.Token)
 	}
 
 	v1 := r.Group("/api/v1")

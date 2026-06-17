@@ -11,6 +11,7 @@ import (
 	"github.com/pysinsjz/vulture-gateway/internal/dao"
 	"github.com/pysinsjz/vulture-gateway/internal/pkg/apierror"
 	"github.com/pysinsjz/vulture-gateway/internal/pkg/idgen"
+	"github.com/pysinsjz/vulture-gateway/internal/service"
 )
 
 var (
@@ -25,12 +26,13 @@ type OAuthHandler struct {
 	authz    *auth.AuthzStore
 	gwcodes  *auth.GWCodeStore
 	users    dao.UserRepository
+	tokenSvc *service.OAuthService
 	clientID string // 期望的桌面端 client_id（vulture-desktop）
 }
 
 // NewOAuthHandler 构造 handler。
-func NewOAuthHandler(upstream auth.UpstreamIDP, authz *auth.AuthzStore, gwcodes *auth.GWCodeStore, users dao.UserRepository, clientID string) *OAuthHandler {
-	return &OAuthHandler{upstream: upstream, authz: authz, gwcodes: gwcodes, users: users, clientID: clientID}
+func NewOAuthHandler(upstream auth.UpstreamIDP, authz *auth.AuthzStore, gwcodes *auth.GWCodeStore, users dao.UserRepository, tokenSvc *service.OAuthService, clientID string) *OAuthHandler {
+	return &OAuthHandler{upstream: upstream, authz: authz, gwcodes: gwcodes, users: users, tokenSvc: tokenSvc, clientID: clientID}
 }
 
 // Authorize 浏览器入口：校验参数 → 暂存 state/challenge/redirect_uri → 302 跳上游。
@@ -125,6 +127,79 @@ func (h *OAuthHandler) Callback(c *gin.Context) {
 	}
 
 	redirectBack(c, req.RedirectURI, url.Values{"code": {gwCode}, "state": {req.OrigState}})
+}
+
+type tokenRequest struct {
+	GrantType    string `json:"grant_type" binding:"required"`
+	Code         string `json:"code"`
+	CodeVerifier string `json:"code_verifier"`
+	ClientID     string `json:"client_id"`
+	RedirectURI  string `json:"redirect_uri"`
+	Device       struct {
+		Name       string `json:"name"`
+		OS         string `json:"os"`
+		AppVersion string `json:"app_version"`
+	} `json:"device"`
+	RefreshToken string `json:"refresh_token"`
+}
+
+type tokenResponse struct {
+	AccessToken  string `json:"access_token"`
+	TokenType    string `json:"token_type"`
+	ExpiresIn    int    `json:"expires_in"`
+	RefreshToken string `json:"refresh_token"`
+	DeviceID     string `json:"device_id"`
+}
+
+// Token 令牌端点：按 grant_type 分流。authorization_code（A1 下半，#12）；refresh_token 待 #13。
+//
+//	POST /oauth/token  (公共客户端 + PKCE)
+func (h *OAuthHandler) Token(c *gin.Context) {
+	var req tokenRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		apierror.AbortOAuth(c, http.StatusBadRequest, apierror.OAuthInvalidRequest, err.Error())
+		return
+	}
+
+	switch req.GrantType {
+	case "authorization_code":
+		h.tokenAuthorizationCode(c, req)
+	case "refresh_token":
+		apierror.AbortOAuth(c, http.StatusBadRequest, apierror.OAuthUnsupportedGrantType, "refresh_token 待 #13 实现")
+	default:
+		apierror.AbortOAuth(c, http.StatusBadRequest, apierror.OAuthInvalidRequest, "未知 grant_type")
+	}
+}
+
+func (h *OAuthHandler) tokenAuthorizationCode(c *gin.Context, req tokenRequest) {
+	// 公共客户端 vulture-desktop 无 client_secret，仅校验 client_id。
+	if req.ClientID != h.clientID {
+		apierror.AbortOAuth(c, http.StatusBadRequest, apierror.OAuthInvalidClient, "未知 client_id")
+		return
+	}
+
+	res, err := h.tokenSvc.ExchangeAuthorizationCode(c.Request.Context(), service.ExchangeCodeInput{
+		Code:         req.Code,
+		CodeVerifier: req.CodeVerifier,
+		RedirectURI:  req.RedirectURI,
+		Device:       service.DeviceMeta{Name: req.Device.Name, OS: req.Device.OS, AppVersion: req.Device.AppVersion},
+	})
+	if errors.Is(err, service.ErrInvalidGrant) {
+		apierror.AbortOAuth(c, http.StatusBadRequest, apierror.OAuthInvalidGrant, "GW_CODE / PKCE / redirect_uri 校验失败")
+		return
+	}
+	if err != nil {
+		apierror.AbortOAuth(c, http.StatusInternalServerError, apierror.OAuthServerError, "令牌签发失败")
+		return
+	}
+
+	c.JSON(http.StatusOK, tokenResponse{
+		AccessToken:  res.AccessToken,
+		TokenType:    "Bearer",
+		ExpiresIn:    res.ExpiresIn,
+		RefreshToken: res.RefreshToken,
+		DeviceID:     res.DeviceID,
+	})
 }
 
 // redirectBack 以 302 跳回桌面端回环地址，附加查询参数。
