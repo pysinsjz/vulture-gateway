@@ -175,7 +175,7 @@ interface SkillListItem {
   slug: string;                // 唯一标识（URL 用）
   displayName: string;         // 展示名
   summary?: string;            // 一句话简介
-  category: { id: string; label: string } | null;     // 浏览分类（单一主分类；服务端按 capabilityTags 派生，§3.1b）
+  category: { id: string; label: string } | null;     // 浏览分类（单一主分类；fork 原生字段，发布时由运营指定，§3.1b）
   tags: Record<string /*tag*/, string /*version*/>;   // tag → 版本号映射；tags.latest 即最新版本
   createdAt: number;           // 创建时间（Unix 毫秒）
   updatedAt: number;           // 最近更新时间（Unix 毫秒）
@@ -199,7 +199,7 @@ interface PluginListItem {
   name: string;                // 唯一标识（包名）
   displayName: string;         // 展示名
   summary?: string;            // 一句话简介
-  category: { id: string; label: string } | null; // 浏览分类（单一主分类；ClawHub 原生 pluginCategory，§3.1b）
+  category: { id: string; label: string } | null; // 浏览分类（单一主分类；pluginCategory 字段，发布时由运营指定，§3.1b）
   family: "code-plugin" | "bundle-plugin";        // 类型：执行代码的插件 / 宿主 bundle
   channel: "official" | "community" | "private";  // 渠道
   isOfficial: boolean;         // 是否官方
@@ -222,8 +222,10 @@ interface PluginListItem {
 { categories: { id: string; label: string; count: number }[] }   // 按运营定义顺序；count = 该分类下可见制品数
 ```
 
-- **plugin 分类来源**：ClawHub 原生 `pluginCategory`（单值）+ `pluginCategoryTags`（次级标签，可选）。
-- **skill 分类来源**：skills 表**无**原生分类字段，**网关按 `capabilityTags` 派生**——维护一张有序映射 `capabilityTag → {id,label}`，取首个命中标签为主分类，无命中归 `其他`（映射为运营维护，见 clawhub-integration.md）。
+- **分类词汇表**：运营在 fork 自定义（业务分类、中文 label、有序），skill/plugin 各一张；分类端点按表序输出。
+- **skill 分类来源**：fork 改造点——skills 表**新增**原生 `category` 字段（单值），**发布时由运营显式指定**，未指定归 `其他`（见 clawhub-integration.md §5）。
+- **plugin 分类来源**：保留 `pluginCategory` 字段（单值，已索引），但 fork **停用其关键词派生**，同样改为发布时显式指定。
+> 原「按 `capabilityTags` 派生」方案已否决：经 fork 语料核实（1000 个 skill），`capabilityTags` 是发布时正则派生的**安全风险标签**（封闭词汇表 9 值，如 `requires-oauth-token`/`crypto`），发布者不可自定义、338 个 skill 无任何 tag，与业务分类零相关；plugin 上游的 `pluginCategory` 派生词汇表亦为英文技术分类，均无法复现业务分组。
 - 列表 filter `?category={id}` 只返回该分类制品；分组展示则客户端拉全量按 `category.id` 归组（制品量级小，无需服务端分组）。
 
 ### 3.2 详情 & 版本

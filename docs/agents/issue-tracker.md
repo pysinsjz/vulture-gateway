@@ -2,7 +2,7 @@
 
 Issues and PRDs for this repo live as GitHub issues. Use the `gh` CLI for all operations.
 
-> **Setup note:** this repo is not yet a git repository and has no GitHub remote. Before `gh` commands will work, run `git init`, commit, create the repo (e.g. `gh repo create`), and add the remote. Until then, the skills cannot read or write issues.
+> **Setup note:** this repo is a git repository with the GitHub remote `git@github.com:pysinsjz/vulture-gateway.git` (`pysinsjz/vulture-gateway`), and `gh` is authenticated — issue commands work as-is.
 
 ## Conventions
 
