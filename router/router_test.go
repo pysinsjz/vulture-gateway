@@ -32,10 +32,22 @@ func newTestEngine(t *testing.T) *gin.Engine {
 		Env:      "test",
 		Server:   config.ServerConfig{Addr: ":0", Mode: gin.TestMode},
 		Redis:    config.RedisConfig{Addr: mr.Addr()},
+		Postgres: config.PostgresConfig{DSN: "host=127.0.0.1 user=x dbname=x port=5432 sslmode=disable"},
 		JWT:      config.JWTConfig{Secret: testSecret, Issuer: "vulture-gateway", AccessTTL: 30 * time.Minute},
+		OAuth: config.OAuthConfig{
+			ClientID:       "vulture-desktop",
+			GatewayBaseURL: "http://127.0.0.1:8080",
+			GWCodeTTL:      60 * time.Second,
+			AuthzTTL:       10 * time.Minute,
+			Upstream:       config.UpstreamConfig{Mode: "stub", AuthorizeURL: "http://127.0.0.1:8080/oauth/_stub/authorize", ClientID: "vulture-gateway", Scopes: "openid profile"},
+		},
 		Scaffold: config.ScaffoldConfig{Enabled: true},
 	}
-	return wire.WireApp(cfg).Engine
+	app, err := wire.WireApp(cfg)
+	if err != nil {
+		t.Fatalf("WireApp 失败: %v", err)
+	}
+	return app.Engine
 }
 
 // signToken 用测试密钥直接签发一枚 access JWT，便于构造过期/异签等边界 token。

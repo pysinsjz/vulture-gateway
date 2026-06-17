@@ -11,10 +11,27 @@ redis:
   password: ""
   db: 0
 
+postgres:
+  # 真实 DSN 由 VG_POSTGRES_DSN 注入。
+  dsn: ""
+
 jwt:
   secret: ""
   issuer: "vulture-gateway"
   access_ttl: "30m"
+
+oauth:
+  client_id: "vulture-desktop"
+  gateway_base_url: ""
+  gw_code_ttl: "60s"
+  authz_ttl: "10m"
+  upstream:
+    mode: "oidc"
+    authorize_url: ""
+    token_url: ""
+    client_id: "vulture-gateway"
+    client_secret: ""
+    scopes: "openid profile"
 
 scaffold:
   enabled: false

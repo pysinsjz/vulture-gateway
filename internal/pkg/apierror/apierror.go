@@ -28,3 +28,21 @@ func New(code, message string) ApiError {
 func Abort(c *gin.Context, status int, code, message string) {
 	c.AbortWithStatusJSON(status, New(code, message))
 }
+
+// OAuthError 是 OAuth 端点（/oauth/*）的错误体，遵循 RFC 6749：{error, error_description}。
+type OAuthError struct {
+	Code        string `json:"error"`
+	Description string `json:"error_description,omitempty"`
+}
+
+// 常用 OAuth 错误码（RFC 6749）。
+const (
+	OAuthInvalidRequest     = "invalid_request"
+	OAuthUnauthorizedClient = "unauthorized_client"
+	OAuthServerError        = "server_error"
+)
+
+// AbortOAuth 写入状态码 + OAuthError 并中止 gin 处理链。
+func AbortOAuth(c *gin.Context, status int, code, description string) {
+	c.AbortWithStatusJSON(status, OAuthError{Code: code, Description: description})
+}

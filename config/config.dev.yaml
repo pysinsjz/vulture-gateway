@@ -10,10 +10,27 @@ redis:
   password: ""
   db: 0
 
+postgres:
+  dsn: "host=127.0.0.1 user=postgres password=postgres dbname=vulture_gateway port=5432 sslmode=disable"
+
 jwt:
   secret: "dev-only-insecure-secret-change-me"
   issuer: "vulture-gateway"
   access_ttl: "30m"
+
+oauth:
+  client_id: "vulture-desktop"
+  gateway_base_url: "http://127.0.0.1:8080"
+  gw_code_ttl: "60s"
+  authz_ttl: "10m"
+  upstream:
+    # stub：内置桩上游，#11 本地联调用；真实 Casdoor 待 #10 部署后切 oidc。
+    mode: "stub"
+    authorize_url: "http://127.0.0.1:8080/oauth/_stub/authorize"
+    token_url: ""
+    client_id: "vulture-gateway"
+    client_secret: ""
+    scopes: "openid profile"
 
 # 脚手架内部签发端点（/__dev/*），仅 dev/test 开启，用于 #9 端到端验证。
 scaffold:

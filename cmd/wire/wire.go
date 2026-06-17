@@ -2,11 +2,16 @@
 package wire
 
 import (
+	"fmt"
+
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
+	"gorm.io/gorm"
 
 	"github.com/pysinsjz/vulture-gateway/config"
 	"github.com/pysinsjz/vulture-gateway/internal/auth"
+	"github.com/pysinsjz/vulture-gateway/internal/dao"
+	"github.com/pysinsjz/vulture-gateway/internal/db"
 	"github.com/pysinsjz/vulture-gateway/internal/handler"
 	"github.com/pysinsjz/vulture-gateway/internal/middleware"
 	"github.com/pysinsjz/vulture-gateway/internal/redisx"
@@ -17,21 +22,37 @@ import (
 type App struct {
 	Engine *gin.Engine
 	Redis  *redis.Client
+	DB     *gorm.DB
 }
 
-// WireApp 按层级顺序手工装配：Redis → 签发器/吊销存储 → 中间件 → handler → router。
-func WireApp(cfg *config.Configuration) *App {
+// WireApp 按层级顺序手工装配：DB/Redis → 签发器/吊销存储/上游/授权暂存 → DAO → handler → router。
+func WireApp(cfg *config.Configuration) (*App, error) {
 	rdb := redisx.NewClient(cfg.Redis)
+
+	gdb, err := db.NewPostgres(cfg.Postgres)
+	if err != nil {
+		return nil, fmt.Errorf("装配 PostgreSQL 失败: %w", err)
+	}
 
 	signer := auth.NewSigner(cfg.JWT)
 	tvs := auth.NewTokenVersionStore(rdb)
+
+	upstream, err := auth.NewUpstream(cfg.OAuth)
+	if err != nil {
+		return nil, fmt.Errorf("装配上游 IdP 失败: %w", err)
+	}
+	authzStore := auth.NewAuthzStore(rdb, cfg.OAuth.AuthzTTL)
+	gwCodeStore := auth.NewGWCodeStore(rdb, cfg.OAuth.GWCodeTTL)
+
+	userDAO := dao.NewUserDAO(gdb)
 
 	jwtAuth := middleware.JWTAuth(signer, tvs, middleware.DefaultPublicPaths)
 
 	probeHandler := handler.NewProbeHandler()
 	scaffoldHandler := handler.NewScaffoldHandler(signer, tvs)
+	oauthHandler := handler.NewOAuthHandler(upstream, authzStore, gwCodeStore, userDAO, cfg.OAuth.ClientID)
 
-	engine := router.NewRouter(cfg, probeHandler, scaffoldHandler, jwtAuth)
+	engine := router.NewRouter(cfg, probeHandler, scaffoldHandler, oauthHandler, jwtAuth)
 
-	return &App{Engine: engine, Redis: rdb}
+	return &App{Engine: engine, Redis: rdb, DB: gdb}, nil
 }

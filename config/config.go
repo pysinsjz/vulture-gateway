@@ -14,8 +14,35 @@ type Configuration struct {
 	Env      string         `mapstructure:"env"`
 	Server   ServerConfig   `mapstructure:"server"`
 	Redis    RedisConfig    `mapstructure:"redis"`
+	Postgres PostgresConfig `mapstructure:"postgres"`
 	JWT      JWTConfig      `mapstructure:"jwt"`
+	OAuth    OAuthConfig    `mapstructure:"oauth"`
 	Scaffold ScaffoldConfig `mapstructure:"scaffold"`
+}
+
+// PostgresConfig 数据库连接（ADR-0001：用 PostgreSQL，非 web-go 默认的 MySQL）。
+type PostgresConfig struct {
+	DSN string `mapstructure:"dsn"` // 完整 DSN，如 host=... user=... dbname=... sslmode=disable
+}
+
+// OAuthConfig 网关作为 OAuth 授权服务器（ADR-0009）的配置。
+type OAuthConfig struct {
+	ClientID       string         `mapstructure:"client_id"`        // 期望的桌面端 client_id，固定 vulture-desktop
+	GatewayBaseURL string         `mapstructure:"gateway_base_url"` // 网关外部基址，用于拼上游回调 URL
+	GWCodeTTL      time.Duration  `mapstructure:"gw_code_ttl"`      // GW_CODE 寿命，默认 60s
+	AuthzTTL       time.Duration  `mapstructure:"authz_ttl"`        // authorize 暂存寿命，默认 10m
+	Upstream       UpstreamConfig `mapstructure:"upstream"`
+}
+
+// UpstreamConfig 上游 Identity Provider（Casdoor）对接配置。
+// Mode=stub 时用内置桩（#11 联调）；Mode=oidc 时走真实 Casdoor（凭据由 #10 填入）。
+type UpstreamConfig struct {
+	Mode         string `mapstructure:"mode"`          // stub | oidc
+	AuthorizeURL string `mapstructure:"authorize_url"` // 上游 authorize 端点
+	TokenURL     string `mapstructure:"token_url"`     // 上游 token 端点
+	ClientID     string `mapstructure:"client_id"`     // 网关在上游注册的 client_id
+	ClientSecret string `mapstructure:"client_secret"` // 由 VG_OAUTH_UPSTREAM_CLIENT_SECRET 注入
+	Scopes       string `mapstructure:"scopes"`        // 空格分隔，如 "openid profile"
 }
 
 // ServerConfig HTTP 服务监听配置。
@@ -87,6 +114,12 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("jwt.issuer", "vulture-gateway")
 	v.SetDefault("jwt.access_ttl", "30m")
 	v.SetDefault("scaffold.enabled", false)
+	v.SetDefault("oauth.client_id", "vulture-desktop")
+	v.SetDefault("oauth.gateway_base_url", "http://127.0.0.1:8080")
+	v.SetDefault("oauth.gw_code_ttl", "60s")
+	v.SetDefault("oauth.authz_ttl", "10m")
+	v.SetDefault("oauth.upstream.mode", "stub")
+	v.SetDefault("oauth.upstream.scopes", "openid profile")
 }
 
 func (c *Configuration) validate() error {
@@ -98,6 +131,20 @@ func (c *Configuration) validate() error {
 	}
 	if c.Redis.Addr == "" {
 		return fmt.Errorf("redis.addr 未配置")
+	}
+	if c.OAuth.ClientID == "" {
+		return fmt.Errorf("oauth.client_id 未配置")
+	}
+	if c.OAuth.GatewayBaseURL == "" {
+		return fmt.Errorf("oauth.gateway_base_url 未配置")
+	}
+	if c.OAuth.GWCodeTTL <= 0 || c.OAuth.AuthzTTL <= 0 {
+		return fmt.Errorf("oauth.gw_code_ttl / authz_ttl 必须为正")
+	}
+	switch c.OAuth.Upstream.Mode {
+	case "stub", "oidc":
+	default:
+		return fmt.Errorf("oauth.upstream.mode 必须为 stub 或 oidc，当前 %q", c.OAuth.Upstream.Mode)
 	}
 	return nil
 }

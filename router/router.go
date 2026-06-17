@@ -19,6 +19,7 @@ func NewRouter(
 	cfg *config.Configuration,
 	probe *handler.ProbeHandler,
 	scaffold *handler.ScaffoldHandler,
+	oauth *handler.OAuthHandler,
 	jwtAuth gin.HandlerFunc,
 ) *gin.Engine {
 	gin.SetMode(ginMode(cfg.Server.Mode))
@@ -29,6 +30,13 @@ func NewRouter(
 	r.GET("/healthz", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
+
+	// OAuth 端点（公开，不经 JWTAuth）。A1 上半：authorize + 上游回调（#11）。
+	oauthGroup := r.Group("/oauth")
+	{
+		oauthGroup.GET("/authorize", oauth.Authorize)
+		oauthGroup.GET("/callback/casdoor", oauth.Callback)
+	}
 
 	v1 := r.Group("/api/v1")
 	v1.Use(jwtAuth)

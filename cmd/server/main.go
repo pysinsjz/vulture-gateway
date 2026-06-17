@@ -13,6 +13,7 @@ import (
 
 	"github.com/pysinsjz/vulture-gateway/cmd/wire"
 	"github.com/pysinsjz/vulture-gateway/config"
+	"github.com/pysinsjz/vulture-gateway/internal/db"
 )
 
 func main() {
@@ -22,7 +23,10 @@ func main() {
 	}
 	log.Printf("vulture-gateway 启动，env=%s addr=%s scaffold=%v", cfg.Env, cfg.Server.Addr, cfg.Scaffold.Enabled)
 
-	app := wire.WireApp(cfg)
+	app, err := wire.WireApp(cfg)
+	if err != nil {
+		log.Fatalf("装配失败: %v", err)
+	}
 
 	// 启动即校验 Redis 连通性（即时吊销依赖 Redis，ADR-0010）。
 	pingCtx, cancelPing := context.WithTimeout(context.Background(), 5*time.Second)
@@ -31,6 +35,15 @@ func main() {
 		log.Fatalf("Redis 连接失败 (%s): %v", cfg.Redis.Addr, err)
 	}
 	log.Printf("Redis 连接就绪 (%s)", cfg.Redis.Addr)
+
+	// 校验 PostgreSQL 连通性并迁移表结构。
+	if err := db.Ping(pingCtx, app.DB); err != nil {
+		log.Fatalf("PostgreSQL 连接失败: %v", err)
+	}
+	if err := db.AutoMigrate(app.DB); err != nil {
+		log.Fatalf("数据库迁移失败: %v", err)
+	}
+	log.Println("PostgreSQL 连接就绪、迁移完成")
 
 	srv := &http.Server{
 		Addr:              cfg.Server.Addr,
@@ -58,6 +71,9 @@ func main() {
 	}
 	if err := app.Redis.Close(); err != nil {
 		log.Printf("关闭 Redis 连接失败: %v", err)
+	}
+	if sqlDB, err := app.DB.DB(); err == nil {
+		_ = sqlDB.Close()
 	}
 	log.Println("已停机")
 }

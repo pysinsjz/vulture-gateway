@@ -11,10 +11,28 @@ redis:
   password: ""
   db: 0
 
+postgres:
+  # 真实 DSN 由 VG_POSTGRES_DSN 注入。
+  dsn: ""
+
 jwt:
   secret: ""
   issuer: "vulture-gateway"
   access_ttl: "30m"
+
+oauth:
+  client_id: "vulture-desktop"
+  gateway_base_url: ""
+  gw_code_ttl: "60s"
+  authz_ttl: "10m"
+  upstream:
+    # 真实 Casdoor（#10 部署后填）。client_secret 由 VG_OAUTH_UPSTREAM_CLIENT_SECRET 注入。
+    mode: "oidc"
+    authorize_url: ""
+    token_url: ""
+    client_id: "vulture-gateway"
+    client_secret: ""
+    scopes: "openid profile"
 
 # 预发关闭脚手架签发端点。
 scaffold:
