@@ -1,0 +1,19 @@
+# 测试环境配置。契约测试不读此文件（直接构造 Configuration），此处供联调/集成环境使用。
+env: test
+
+server:
+  addr: ":8080"
+  mode: test
+
+redis:
+  addr: "127.0.0.1:6379"
+  password: ""
+  db: 1
+
+jwt:
+  secret: "test-only-insecure-secret-change-me"
+  issuer: "vulture-gateway"
+  access_ttl: "30m"
+
+scaffold:
+  enabled: true

@@ -1,2 +1,15 @@
 # macOS
 .DS_Store
+
+# Go
+/server
+/bin/
+*.exe
+*.test
+*.out
+coverage.*
+
+# 本地环境覆盖
+*.local.yaml
+.env
+.env.*

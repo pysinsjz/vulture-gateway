@@ -1,0 +1,20 @@
+# 开发环境配置。敏感项（jwt.secret）建议用 VG_JWT_SECRET 覆盖，此处给开发占位值。
+env: dev
+
+server:
+  addr: ":8080"
+  mode: debug
+
+redis:
+  addr: "127.0.0.1:6379"
+  password: ""
+  db: 0
+
+jwt:
+  secret: "dev-only-insecure-secret-change-me"
+  issuer: "vulture-gateway"
+  access_ttl: "30m"
+
+# 脚手架内部签发端点（/__dev/*），仅 dev/test 开启，用于 #9 端到端验证。
+scaffold:
+  enabled: true

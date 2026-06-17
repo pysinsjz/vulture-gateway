@@ -1,0 +1,21 @@
+# 预发环境配置。jwt.secret / redis.password 必须由环境变量注入（VG_JWT_SECRET / VG_REDIS_PASSWORD），
+# 此处留空，启动时校验会拒绝空 secret。
+env: staging
+
+server:
+  addr: ":8080"
+  mode: release
+
+redis:
+  addr: "127.0.0.1:6379"
+  password: ""
+  db: 0
+
+jwt:
+  secret: ""
+  issuer: "vulture-gateway"
+  access_ttl: "30m"
+
+# 预发关闭脚手架签发端点。
+scaffold:
+  enabled: false
