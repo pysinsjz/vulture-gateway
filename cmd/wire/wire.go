@@ -59,6 +59,7 @@ func WireApp(cfg *config.Configuration) (*App, error) {
 
 	clawHubClient := clawhub.NewHTTPClient(cfg.ClawHub.BaseURL, &http.Client{Timeout: cfg.ClawHub.Timeout})
 	pluginService := service.NewPluginService(clawHubClient)
+	skillService := service.NewSkillService(clawHubClient)
 
 	jwtAuth := middleware.JWTAuth(signer, tvs, middleware.DefaultPublicPaths)
 
@@ -67,8 +68,9 @@ func WireApp(cfg *config.Configuration) (*App, error) {
 	oauthHandler := handler.NewOAuthHandler(upstream, authzStore, gwCodeStore, userDAO, oauthService, cfg.OAuth.ClientID)
 	deviceHandler := handler.NewDeviceHandler(signer, deviceService)
 	pluginHandler := handler.NewPluginHandler(pluginService)
+	skillHandler := handler.NewSkillHandler(skillService)
 
-	engine := router.NewRouter(cfg, probeHandler, scaffoldHandler, oauthHandler, deviceHandler, pluginHandler, jwtAuth)
+	engine := router.NewRouter(cfg, probeHandler, scaffoldHandler, oauthHandler, deviceHandler, pluginHandler, skillHandler, jwtAuth)
 
 	return &App{Engine: engine, Redis: rdb, DB: gdb}, nil
 }

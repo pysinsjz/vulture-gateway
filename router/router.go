@@ -22,11 +22,17 @@ func NewRouter(
 	oauth *handler.OAuthHandler,
 	device *handler.DeviceHandler,
 	plugin *handler.PluginHandler,
+	skill *handler.SkillHandler,
 	jwtAuth gin.HandlerFunc,
 ) *gin.Engine {
 	gin.SetMode(ginMode(cfg.Server.Mode))
 
 	r := gin.New()
+	// scoped plugin 包名（如 @vulture/notion-sync）含 `/`，客户端须 URL 编码（%2F）。
+	// UseRawPath 让 gin 按转义路径路由，使编码后的名字落在单个 :name 段；
+	// UnescapePathValues（默认 true）再把 c.Param 还原为解码值。
+	r.UseRawPath = true
+	r.UnescapePathValues = true
 	r.Use(gin.Logger(), gin.Recovery())
 
 	r.GET("/healthz", func(c *gin.Context) {
@@ -52,8 +58,16 @@ func NewRouter(
 		v1.POST("/auth/logout", device.Logout)
 		v1.GET("/devices", device.ListDevices)
 		v1.DELETE("/devices/:device_id", device.DeleteDevice)
-		// plugin 列表：鉴权后转发内网 ClawHub /packages（#19 曳光弹；端点翻译铺满见 #20）。
+		// skill 族：鉴权后转发内网 ClawHub skills/skillVersions（#20）。
+		v1.GET("/skills", skill.ListSkills)
+		v1.GET("/skills/:slug", skill.GetSkill)
+		v1.GET("/skills/:slug/versions", skill.ListSkillVersions)
+		v1.GET("/skills/:slug/versions/:version", skill.GetSkillVersion)
+		v1.GET("/skills/:slug/resolve", skill.ResolveSkill)
+		// plugin 族：鉴权后转发内网 ClawHub packages/packageReleases（#19 list 曳光弹 + #20 铺满）。
 		v1.GET("/plugins", plugin.ListPlugins)
+		v1.GET("/plugins/:name", plugin.GetPlugin)
+		v1.GET("/plugins/:name/versions/:version", plugin.GetPluginVersion)
 	}
 
 	if cfg.Scaffold.Enabled {
