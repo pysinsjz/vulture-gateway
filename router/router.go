@@ -85,6 +85,7 @@ func NewRouter(
 	llmGroup.Use(jwtAuthLLM)
 	{
 		llmGroup.GET("/models", llm.ListModels)
+		llmGroup.POST("/chat/completions", llm.ChatCompletions) // 流式推理 SSE + include_usage 注入 + 双超时（#24）
 	}
 
 	if cfg.Scaffold.Enabled {

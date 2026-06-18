@@ -44,6 +44,8 @@ llm:
   base_url: "http://127.0.0.1:4000"
   virtual_key: ""
   timeout: "30s"
+  stream_idle_timeout: "120s"   # 流式推理 chunk 间空闲上限（#24 / ADR-0008）
+  stream_request_timeout: "30m" # 流式推理单请求总时长上限（#24 / ADR-0008）
 
 # 脚手架内部签发端点（/__dev/*），仅 dev/test 开启，用于 #9 端到端验证。
 scaffold:

@@ -2,9 +2,12 @@ package router_test
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/pysinsjz/vulture-gateway/config"
 )
@@ -139,4 +142,198 @@ func TestModels_UpstreamUnreachable(t *testing.T) {
 		t.Fatalf("期望 502, 实际 %d: %s", rec.Code, rec.Body.String())
 	}
 	assertOpenAIError(t, rec, "")
+}
+
+// ===== D2 流式推理（#24）=====
+
+// withLLMIdle 把 LLM 基址指向桩并调小流式空闲超时，便于断流测试。
+func withLLMIdle(url string, idle time.Duration) func(*config.Configuration) {
+	return func(cfg *config.Configuration) {
+		cfg.LLM.BaseURL = url
+		cfg.LLM.StreamIdleTimeout = idle
+	}
+}
+
+// sseWrite 写一个 SSE chunk 并 flush。
+func sseWrite(w http.ResponseWriter, fl http.Flusher, line string) {
+	_, _ = io.WriteString(w, line)
+	fl.Flush()
+}
+
+// 正路：stream:true → 网关强制注入 include_usage、SSE 逐 chunk 透传、保留 call-id、剥成本头、注入 virtual key。
+func TestChatCompletions_StreamingPassthroughAndInjectsUsage(t *testing.T) {
+	var gotAuth string
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &gotBody)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("X-Litellm-Call-Id", "call-77")
+		w.Header().Set("X-Litellm-Response-Cost", "0.0042")
+		w.WriteHeader(http.StatusOK)
+		fl := w.(http.Flusher)
+		sseWrite(w, fl, "data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n")
+		sseWrite(w, fl, "data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n")
+		sseWrite(w, fl, "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":3,\"total_tokens\":15}}\n\n")
+		sseWrite(w, fl, "data: [DONE]\n\n")
+	}))
+	t.Cleanup(srv.Close)
+
+	e := newTestEngine(t, withLLM(srv.URL))
+	token := issueViaScaffold(t, e, "user-llm", "dev-llm")
+
+	rec := do(t, e, http.MethodPost, "/v1/chat/completions", token, map[string]any{
+		"model":    "gpt-4",
+		"messages": []map[string]string{{"role": "user", "content": "hi"}},
+		"stream":   true,
+	})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("期望 200, 实际 %d: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{`"content":"Hel"`, `"content":"lo"`, `"total_tokens":15`, "data: [DONE]"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("SSE 输出缺 %q\n实际: %s", want, body)
+		}
+	}
+	// 网关强制注入 include_usage（客户端未传 stream_options）。
+	includeUsage := false
+	if so, ok := gotBody["stream_options"].(map[string]any); ok {
+		includeUsage, _ = so["include_usage"].(bool)
+	}
+	if !includeUsage {
+		t.Errorf("网关应强制注入 stream_options.include_usage=true, 桩收到 body=%v", gotBody)
+	}
+	if gotAuth != "Bearer test-vkey" {
+		t.Errorf("应注入 virtual key, 桩收到 Authorization=%q", gotAuth)
+	}
+	if rec.Header().Get("X-Litellm-Call-Id") != "call-77" {
+		t.Error("x-litellm-call-id 应保留透传")
+	}
+	if rec.Header().Get("X-Litellm-Response-Cost") != "" {
+		t.Error("成本头应被剥除")
+	}
+}
+
+// 非流式：stream:false → 不注入 stream_options，返回 JSON 且 usage 在体内。
+func TestChatCompletions_NonStreamingJSON(t *testing.T) {
+	var sawStreamOptions bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		var m map[string]any
+		_ = json.Unmarshal(raw, &m)
+		_, sawStreamOptions = m["stream_options"]
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"c1","choices":[{"message":{"content":"hi"}}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	e := newTestEngine(t, withLLM(srv.URL))
+	token := issueViaScaffold(t, e, "user-llm", "dev-llm")
+
+	rec := do(t, e, http.MethodPost, "/v1/chat/completions", token, map[string]any{
+		"model":    "gpt-4",
+		"messages": []map[string]string{{"role": "user", "content": "hi"}},
+		"stream":   false,
+	})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("期望 200, 实际 %d: %s", rec.Code, rec.Body.String())
+	}
+	if sawStreamOptions {
+		t.Error("非流式不应注入 stream_options（OpenAI 对此会 400）")
+	}
+	if !strings.Contains(rec.Body.String(), `"total_tokens":7`) {
+		t.Errorf("非流式 usage 应在响应体内, 实际 %s", rec.Body.String())
+	}
+}
+
+// usage chunk 缺失：仍 200、以 [DONE] 收尾、不崩溃、不误阻断。
+func TestChatCompletions_MissingUsageChunkTolerated(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fl := w.(http.Flusher)
+		sseWrite(w, fl, "data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n")
+		sseWrite(w, fl, "data: [DONE]\n\n") // 无 usage chunk
+	}))
+	t.Cleanup(srv.Close)
+
+	e := newTestEngine(t, withLLM(srv.URL))
+	token := issueViaScaffold(t, e, "user-llm", "dev-llm")
+
+	rec := do(t, e, http.MethodPost, "/v1/chat/completions", token, map[string]any{
+		"model": "gpt-4", "messages": []map[string]string{{"role": "user", "content": "hi"}}, "stream": true,
+	})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("期望 200, 实际 %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "data: [DONE]") || !strings.Contains(body, `"content":"x"`) {
+		t.Errorf("缺 usage 仍应完整透传 chunk + [DONE], 实际 %s", body)
+	}
+}
+
+// 上游错误：litellm 返 400 OpenAI 错误体 → 网关原样透传状态码与体。
+func TestChatCompletions_UpstreamErrorPassthrough(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"bad model","type":"invalid_request_error","code":"model_not_found"}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	e := newTestEngine(t, withLLM(srv.URL))
+	token := issueViaScaffold(t, e, "user-llm", "dev-llm")
+
+	rec := do(t, e, http.MethodPost, "/v1/chat/completions", token, map[string]any{
+		"model": "nope", "messages": []map[string]string{{"role": "user", "content": "hi"}}, "stream": true,
+	})
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("应透传上游 400, 实际 %d", rec.Code)
+	}
+	assertOpenAIError(t, rec, "model_not_found")
+}
+
+// 空闲超时：首 chunk 后上游久停 → 网关空闲超时中断（已发部分到达、[DONE] 未到）。
+func TestChatCompletions_IdleTimeoutAbortsStream(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fl := w.(http.Flusher)
+		sseWrite(w, fl, "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n")
+		time.Sleep(400 * time.Millisecond) // > idle，触发网关中断
+		sseWrite(w, fl, "data: [DONE]\n\n")
+	}))
+	t.Cleanup(srv.Close)
+
+	e := newTestEngine(t, withLLMIdle(srv.URL, 80*time.Millisecond))
+	token := issueViaScaffold(t, e, "user-llm", "dev-llm")
+
+	rec := do(t, e, http.MethodPost, "/v1/chat/completions", token, map[string]any{
+		"model": "gpt-4", "messages": []map[string]string{{"role": "user", "content": "hi"}}, "stream": true,
+	})
+
+	body := rec.Body.String()
+	if !strings.Contains(body, `"content":"partial"`) {
+		t.Errorf("中断前已生成部分应到达, 实际 %s", body)
+	}
+	if strings.Contains(body, "data: [DONE]") {
+		t.Errorf("空闲超时应在 [DONE] 前中断, 实际 %s", body)
+	}
+}
+
+// 无 Bearer → 401，OpenAI 错误体形态（JWTAuthLLM 覆盖 chat 端点）。
+func TestChatCompletions_NoTokenUnauthorized(t *testing.T) {
+	e := newTestEngine(t)
+	rec := do(t, e, http.MethodPost, "/v1/chat/completions", "", map[string]any{"model": "x"})
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("无 token 期望 401, 实际 %d", rec.Code)
+	}
+	assertOpenAIError(t, rec, "unauthorized")
 }

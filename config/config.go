@@ -27,7 +27,10 @@ type Configuration struct {
 type LLMConfig struct {
 	BaseURL    string        `mapstructure:"base_url"`    // litellm 基址，如 http://127.0.0.1:4000
 	VirtualKey string        `mapstructure:"virtual_key"` // litellm virtual key（VG_LLM_VIRTUAL_KEY 注入；空则不带鉴权头）
-	Timeout    time.Duration `mapstructure:"timeout"`     // 转发超时，默认 30s（流式 S2 另议）
+	Timeout    time.Duration `mapstructure:"timeout"`     // 非流式（如 /v1/models）转发超时，默认 30s
+	// 以下为流式推理（/v1/chat/completions，#24）双超时（ADR-0008）：
+	StreamIdleTimeout    time.Duration `mapstructure:"stream_idle_timeout"`    // chunk 间空闲上限，默认 120s
+	StreamRequestTimeout time.Duration `mapstructure:"stream_request_timeout"` // 单请求总时长上限，默认 30m
 }
 
 // ClawHubConfig 内网 ClawHub（fork 裁剪版注册中心，ADR-0006）转发配置。
@@ -145,6 +148,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("clawhub.timeout", "10s")
 	v.SetDefault("llm.base_url", "http://127.0.0.1:4000")
 	v.SetDefault("llm.timeout", "30s")
+	v.SetDefault("llm.stream_idle_timeout", "120s")
+	v.SetDefault("llm.stream_request_timeout", "30m")
 }
 
 func (c *Configuration) validate() error {

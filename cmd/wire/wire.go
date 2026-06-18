@@ -76,7 +76,7 @@ func WireApp(cfg *config.Configuration) (*App, error) {
 	pluginHandler := handler.NewPluginHandler(pluginService)
 	skillHandler := handler.NewSkillHandler(skillService)
 	telemetryHandler := handler.NewTelemetryHandler(telemetryService)
-	llmHandler := handler.NewLLMHandler(llmService)
+	llmHandler := handler.NewLLMHandler(llmService, cfg.LLM.StreamIdleTimeout, cfg.LLM.StreamRequestTimeout)
 
 	engine := router.NewRouter(cfg, probeHandler, scaffoldHandler, oauthHandler, deviceHandler, pluginHandler, skillHandler, telemetryHandler, llmHandler, jwtAuth, jwtAuthLLM)
 
