@@ -26,14 +26,38 @@ var DefaultPublicPaths = []string{
 	"/api/v1/auth/logout",
 }
 
-// JWTAuth 校验 access JWT 并执行即时吊销比对（ADR-0010）。
+// unauthorizedFunc 写入 401 错误体（按端点族区分形态）。
+type unauthorizedFunc func(c *gin.Context, message string)
+
+// managementUnauthorized 管理 API 族（/api/v1/*）：ApiError{error, message}。
+func managementUnauthorized(c *gin.Context, message string) {
+	apierror.Abort(c, http.StatusUnauthorized, apierror.CodeUnauthorized, message)
+}
+
+// llmUnauthorized LLM 代理族（/v1/*）：OpenAI 兼容 {error:{message,type,code}}。
+func llmUnauthorized(c *gin.Context, message string) {
+	apierror.AbortOpenAI(c, http.StatusUnauthorized, apierror.OpenAITypeInvalidRequest, apierror.CodeUnauthorized, message)
+}
+
+// JWTAuth 是管理 API 族（/api/v1/*）的鉴权中间件：失败返回 ApiError。
+func JWTAuth(verifier *auth.Signer, tvs *auth.TokenVersionStore, publicPaths []string) gin.HandlerFunc {
+	return jwtAuth(verifier, tvs, publicPaths, managementUnauthorized)
+}
+
+// JWTAuthLLM 是 LLM 代理族（/v1/*）的鉴权中间件：失败返回 OpenAI 错误体。
+// 供 LLM 域（#23+）的 /v1/* 端点使用，使三族错误体在鉴权层即各呈其形（#15）。
+func JWTAuthLLM(verifier *auth.Signer, tvs *auth.TokenVersionStore, publicPaths []string) gin.HandlerFunc {
+	return jwtAuth(verifier, tvs, publicPaths, llmUnauthorized)
+}
+
+// jwtAuth 校验 access JWT 并执行即时吊销比对（ADR-0010）。错误体形态由 onUnauthorized 决定。
 //
 // 流程：公开例外放行 → 取 Bearer token → 验签/校验有效期 → 与 Redis 中该 Device 当前
-// token_version 做一次 O(1) 比对。任意失败返回 401 + ApiError{error, message}。
+// token_version 做一次 O(1) 比对。任意失败返回 401（族特定错误体）。
 //
-// 注：按 api-conventions.md，「Device 被吊销」语义上对应 403 device_revoked；本切片（#9）
-// 按 issue 验收口径将 token_version 不匹配也归为 401，待 A3 设备吊销切片统一口径。
-func JWTAuth(verifier *auth.Signer, tvs *auth.TokenVersionStore, publicPaths []string) gin.HandlerFunc {
+// 注：按 api-conventions.md，「Device 被吊销」语义上对应 403 device_revoked；当前按 issue
+// 验收口径将 token_version 不匹配也归为 401，口径统一待后续。
+func jwtAuth(verifier *auth.Signer, tvs *auth.TokenVersionStore, publicPaths []string, onUnauthorized unauthorizedFunc) gin.HandlerFunc {
 	public := make(map[string]struct{}, len(publicPaths))
 	for _, p := range publicPaths {
 		public[p] = struct{}{}
@@ -47,23 +71,23 @@ func JWTAuth(verifier *auth.Signer, tvs *auth.TokenVersionStore, publicPaths []s
 
 		raw, ok := BearerToken(c)
 		if !ok {
-			apierror.Abort(c, http.StatusUnauthorized, apierror.CodeUnauthorized, "缺失或格式错误的 Authorization 头")
+			onUnauthorized(c, "缺失或格式错误的 Authorization 头")
 			return
 		}
 
 		claims, err := verifier.Verify(raw)
 		if err != nil {
-			apierror.Abort(c, http.StatusUnauthorized, apierror.CodeUnauthorized, "access token 无效或已过期")
+			onUnauthorized(c, "access token 无效或已过期")
 			return
 		}
 
 		current, exists, err := tvs.Current(c.Request.Context(), claims.DeviceID)
 		if err != nil {
-			apierror.Abort(c, http.StatusUnauthorized, apierror.CodeUnauthorized, "无法校验 token 状态")
+			onUnauthorized(c, "无法校验 token 状态")
 			return
 		}
 		if !exists || current != claims.TokenVersion {
-			apierror.Abort(c, http.StatusUnauthorized, apierror.CodeUnauthorized, "access token 已被吊销")
+			onUnauthorized(c, "access token 已被吊销")
 			return
 		}
 

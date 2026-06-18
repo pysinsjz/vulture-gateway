@@ -42,10 +42,34 @@ const (
 	OAuthInvalidClient        = "invalid_client"
 	OAuthInvalidGrant         = "invalid_grant"
 	OAuthUnsupportedGrantType = "unsupported_grant_type"
+	OAuthAccessDenied         = "access_denied"
 	OAuthServerError          = "server_error"
 )
 
 // AbortOAuth 写入状态码 + OAuthError 并中止 gin 处理链。
 func AbortOAuth(c *gin.Context, status int, code, description string) {
 	c.AbortWithStatusJSON(status, OAuthError{Code: code, Description: description})
+}
+
+// OpenAIError 是 LLM 代理族（/v1/*）的错误体，贴 OpenAI 兼容形态：{error:{message,type,code}}。
+// 桌面端对 LLM 族用统一的 OpenAI 错误解析（含网关自身 401/402/403/413/429）。
+type OpenAIError struct {
+	Error OpenAIErrorBody `json:"error"`
+}
+
+// OpenAIErrorBody 是 OpenAI 错误体的内层。
+type OpenAIErrorBody struct {
+	Message string `json:"message"`
+	Type    string `json:"type"`
+	Code    string `json:"code,omitempty"`
+}
+
+// OpenAI 错误 type 常量。
+const (
+	OpenAITypeInvalidRequest = "invalid_request_error"
+)
+
+// AbortOpenAI 写入状态码 + OpenAIError 并中止 gin 处理链。
+func AbortOpenAI(c *gin.Context, status int, typ, code, message string) {
+	c.AbortWithStatusJSON(status, OpenAIError{Error: OpenAIErrorBody{Message: message, Type: typ, Code: code}})
 }

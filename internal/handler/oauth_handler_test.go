@@ -257,6 +257,10 @@ func newOAuthFixture(t *testing.T) *oauthFixture {
 	v1.POST("/auth/logout", dh.Logout)
 	v1.GET("/devices", dh.ListDevices)
 	v1.DELETE("/devices/:device_id", dh.DeleteDevice)
+	// LLM 代理族占位（JWTAuthLLM）：用于校验三族错误体分流（#15）；真实端点见 LLM 域 #23+。
+	llm := r.Group("/v1")
+	llm.Use(middleware.JWTAuthLLM(signer, tvs, nil))
+	llm.GET("/ping", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
 
 	return &oauthFixture{engine: r, mr: mr, rdb: rdb, upstream: up, users: users, gwcodes: gwStore, devices: devices, refreshes: refreshes}
 }
