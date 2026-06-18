@@ -8,7 +8,7 @@ import (
 )
 
 func newBootstrap(notices ...service.Notice) *service.BootstrapService {
-	return service.NewBootstrapService("1.4.2", "1.2.0", false, 25, notices)
+	return service.NewBootstrapService("1.4.2", "1.2.0", false, 25, notices, nil)
 }
 
 // feature_flags：按注册表登记键与类型返回（mcp_enabled bool / max_upload_mb number）。
@@ -64,8 +64,8 @@ func TestBootstrap_ETagBucketing(t *testing.T) {
 
 // ETag 随内容变化：flags 变更（mcp_enabled）→ ETag 改变。
 func TestBootstrap_ETagChangesWithContent(t *testing.T) {
-	off := service.NewBootstrapService("1.4.2", "1.2.0", false, 25, nil)
-	on := service.NewBootstrapService("1.4.2", "1.2.0", true, 25, nil)
+	off := service.NewBootstrapService("1.4.2", "1.2.0", false, 25, nil, nil)
+	on := service.NewBootstrapService("1.4.2", "1.2.0", true, 25, nil, nil)
 	if mustETag(off, "stable", "1.0.0", "darwin-arm64") == mustETag(on, "stable", "1.0.0", "darwin-arm64") {
 		t.Error("flags 变更后 ETag 应改变")
 	}

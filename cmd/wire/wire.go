@@ -97,7 +97,7 @@ func WireApp(cfg *config.Configuration) (*App, error) {
 	if maxUploadMB <= 0 {
 		maxUploadMB = 25
 	}
-	bootstrapService := service.NewBootstrapService(cfg.Bootstrap.GatewayVersion, cfg.Bootstrap.MinAppVersion, cfg.Bootstrap.McpEnabled, maxUploadMB, toNotices(cfg.Bootstrap.Notices))
+	bootstrapService := service.NewBootstrapService(cfg.Bootstrap.GatewayVersion, cfg.Bootstrap.MinAppVersion, cfg.Bootstrap.McpEnabled, maxUploadMB, toNotices(cfg.Bootstrap.Notices), distributionService)
 	bootstrapHandler := handler.NewBootstrapHandler(bootstrapService)
 
 	engine := router.NewRouter(cfg, probeHandler, scaffoldHandler, oauthHandler, deviceHandler, pluginHandler, skillHandler, telemetryHandler, llmHandler, distributionHandler, bootstrapHandler, jwtAuth, jwtAuthLLM)

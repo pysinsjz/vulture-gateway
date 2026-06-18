@@ -185,3 +185,92 @@ func TestBootstrap_ExpiredNoticeHidden(t *testing.T) {
 		t.Errorf("过期公告应被过滤, 实际 %v", ids)
 	}
 }
+
+// ===== S2 app_update 内嵌复用 distribution 判定（#29）=====
+
+type appUpdateBody struct {
+	LatestVersion string `json:"latest_version"`
+	Mandatory     bool   `json:"mandatory"`
+	DownloadURL   string `json:"download_url"`
+	Checksum      string `json:"checksum"`
+	Size          int64  `json:"size"`
+}
+
+// 两路同构：bootstrap app_update 与同入参 app/latest 给出一致摘要。
+func TestBootstrap_AppUpdateMatchesAppLatest(t *testing.T) {
+	e := newTestEngine(t, withReleases(sampleReleases()...)) // stable darwin-arm64 最新 1.3.0
+	headers := map[string]string{"X-App-Version": "1.1.0", "X-Platform": "darwin-arm64"}
+
+	bs := getBootstrap(t, e, "", headers)
+	var bb struct {
+		AppUpdate *appUpdateBody `json:"app_update"`
+	}
+	_ = json.Unmarshal(bs.Body.Bytes(), &bb)
+	if bb.AppUpdate == nil {
+		t.Fatalf("应有 app_update, 实际 %s", bs.Body.String())
+	}
+
+	al := getAppLatest(t, e, "?platform=darwin-arm64&current_version=1.1.0", nil)
+	var ab appLatestBody
+	_ = json.Unmarshal(al.Body.Bytes(), &ab)
+
+	if bb.AppUpdate.LatestVersion != ab.LatestVersion ||
+		bb.AppUpdate.Mandatory != ab.Mandatory ||
+		bb.AppUpdate.DownloadURL != ab.DownloadURL ||
+		bb.AppUpdate.Checksum != ab.Checksum ||
+		bb.AppUpdate.Size != ab.Size {
+		t.Errorf("两路 app_update 应一致:\n bootstrap=%+v\n app/latest=%+v", *bb.AppUpdate, ab)
+	}
+}
+
+// 已最新：bootstrap app_update=null（与 app/latest update_available=false 同态）。
+func TestBootstrap_AppUpdateNullWhenLatest(t *testing.T) {
+	e := newTestEngine(t, withReleases(sampleReleases()...))
+	headers := map[string]string{"X-App-Version": "1.3.0", "X-Platform": "darwin-arm64"}
+	rec := getBootstrap(t, e, "", headers)
+	var bb struct {
+		AppUpdate *json.RawMessage `json:"app_update"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &bb)
+	if bb.AppUpdate != nil {
+		t.Errorf("已最新 app_update 应 null, 实际 %s", string(*bb.AppUpdate))
+	}
+}
+
+// 强更口径一致：低于 release min_version → 两路 mandatory 均 true。
+func TestBootstrap_AppUpdateMandatoryConsistent(t *testing.T) {
+	releases := []config.ReleaseEntry{
+		{Channel: "stable", Platform: "darwin-arm64", Version: "2.0.0", MinVersion: "1.5.0",
+			DownloadURL: "https://r2.example.com/v2.dmg", Checksum: "sha256:x", Size: 1},
+	}
+	e := newTestEngine(t, withReleases(releases...))
+	bs := getBootstrap(t, e, "", map[string]string{"X-App-Version": "1.0.0", "X-Platform": "darwin-arm64"})
+	var bb struct {
+		AppUpdate *appUpdateBody `json:"app_update"`
+	}
+	_ = json.Unmarshal(bs.Body.Bytes(), &bb)
+	if bb.AppUpdate == nil || !bb.AppUpdate.Mandatory {
+		t.Errorf("低于 min 两路均应 mandatory, 实际 %+v", bb.AppUpdate)
+	}
+}
+
+// app_update 变更纳入 ETag：发布版本变化后旧 ETag 不命中 304（得 200）。
+func TestBootstrap_AppUpdateChangeBustsETag(t *testing.T) {
+	headers := map[string]string{"X-App-Version": "1.1.0", "X-Platform": "darwin-arm64"}
+
+	old := newTestEngine(t, withReleases(config.ReleaseEntry{
+		Channel: "stable", Platform: "darwin-arm64", Version: "1.3.0", MinVersion: "1.0.0",
+		DownloadURL: "https://r2.example.com/v1.3.dmg", Checksum: "sha256:a", Size: 1,
+	}))
+	oldEtag := getBootstrap(t, old, "", headers).Header().Get("ETag")
+
+	newer := newTestEngine(t, withReleases(config.ReleaseEntry{
+		Channel: "stable", Platform: "darwin-arm64", Version: "1.4.0", MinVersion: "1.0.0",
+		DownloadURL: "https://r2.example.com/v1.4.dmg", Checksum: "sha256:b", Size: 2,
+	}))
+	h := map[string]string{"X-App-Version": "1.1.0", "X-Platform": "darwin-arm64", "If-None-Match": oldEtag}
+	rec := getBootstrap(t, newer, "", h)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("app_update 变更后旧 ETag 应得 200, 实际 %d", rec.Code)
+	}
+}
