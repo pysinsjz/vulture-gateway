@@ -26,6 +26,7 @@ func NewRouter(
 	telemetry *handler.TelemetryHandler,
 	llm *handler.LLMHandler,
 	distribution *handler.DistributionHandler,
+	bootstrap *handler.BootstrapHandler,
 	jwtAuth gin.HandlerFunc,
 	jwtAuthLLM gin.HandlerFunc,
 ) *gin.Engine {
@@ -56,7 +57,7 @@ func NewRouter(
 	{
 		v1.GET("/whoami", probe.Whoami)
 		// 公开例外：JWTAuth 放行（见 middleware.DefaultPublicPaths）。
-		v1.GET("/bootstrap", probe.BootstrapStub)
+		v1.GET("/bootstrap", bootstrap.Bootstrap)     // 启动引导聚合（公开例外，#28）
 		v1.GET("/app/latest", distribution.AppLatest) // 宿主 App 自更新（公开例外，#27）
 		// logout 自带鉴权（公开例外）；devices 需 Bearer。
 		v1.POST("/auth/logout", device.Logout)

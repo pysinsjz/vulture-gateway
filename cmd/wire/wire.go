@@ -92,9 +92,34 @@ func WireApp(cfg *config.Configuration) (*App, error) {
 	distributionService := service.NewDistributionService(toReleases(cfg.Distribution.Releases))
 	distributionHandler := handler.NewDistributionHandler(distributionService)
 
-	engine := router.NewRouter(cfg, probeHandler, scaffoldHandler, oauthHandler, deviceHandler, pluginHandler, skillHandler, telemetryHandler, llmHandler, distributionHandler, jwtAuth, jwtAuthLLM)
+	// 启动引导聚合（#28）：max_upload_mb 派生自 LLM 请求体上限（与 /v1/* 413 一致）。
+	maxUploadMB := cfg.LLM.MaxRequestBytes / (1024 * 1024)
+	if maxUploadMB <= 0 {
+		maxUploadMB = 25
+	}
+	bootstrapService := service.NewBootstrapService(cfg.Bootstrap.GatewayVersion, cfg.Bootstrap.MinAppVersion, cfg.Bootstrap.McpEnabled, maxUploadMB, toNotices(cfg.Bootstrap.Notices))
+	bootstrapHandler := handler.NewBootstrapHandler(bootstrapService)
+
+	engine := router.NewRouter(cfg, probeHandler, scaffoldHandler, oauthHandler, deviceHandler, pluginHandler, skillHandler, telemetryHandler, llmHandler, distributionHandler, bootstrapHandler, jwtAuth, jwtAuthLLM)
 
 	return &App{Engine: engine, Redis: rdb, DB: gdb}, nil
+}
+
+// toNotices 把 config 公告映射为 service 层视图。
+func toNotices(entries []config.NoticeEntry) []service.Notice {
+	out := make([]service.Notice, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, service.Notice{
+			ID:       e.ID,
+			Level:    e.Level,
+			Title:    e.Title,
+			Content:  e.Content,
+			StartsAt: e.StartsAt,
+			EndsAt:   e.EndsAt,
+			URL:      e.URL,
+		})
+	}
+	return out
 }
 
 // toReleases 把 config 发布清单映射为 service 层视图（避免 service 依赖 config）。

@@ -75,6 +75,14 @@ distribution:
       size: 52000000
       release_notes: "占位发布说明"
 
+# 启动引导聚合端点（#28，F2）。gateway_version/min_app_version/公告占位，待运营/发布接入。
+bootstrap:
+  gateway_version: "0.1.0-dev"
+  min_app_version: "1.0.0"
+  mcp_enabled: false           # feature_flag：E 域 MCP 入口（暂缓，留扩展位）
+  # max_upload_mb 派生自 llm.max_request_bytes，无需在此配置
+  notices: []                  # 运营公告占位（空=无公告）
+
 # 脚手架内部签发端点（/__dev/*），仅 dev/test 开启，用于 #9 端到端验证。
 scaffold:
   enabled: true

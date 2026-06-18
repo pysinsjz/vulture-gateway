@@ -26,11 +26,3 @@ func (h *ProbeHandler) Whoami(c *gin.Context) {
 		"device_id": c.GetString(middleware.CtxKeyDeviceID),
 	})
 }
-
-// BootstrapStub 是 /api/v1/bootstrap 的占位。真实实现属 bootstrap 域（见 bootstrap.md），
-// 本切片仅用它验证 JWTAuth 的公开例外放行。
-//
-//	GET /api/v1/bootstrap  (公开)
-func (h *ProbeHandler) BootstrapStub(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"stub": true, "endpoint": "bootstrap"})
-}

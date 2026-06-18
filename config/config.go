@@ -20,7 +20,28 @@ type Configuration struct {
 	ClawHub      ClawHubConfig      `mapstructure:"clawhub"`
 	LLM          LLMConfig          `mapstructure:"llm"`
 	Distribution DistributionConfig `mapstructure:"distribution"`
+	Bootstrap    BootstrapConfig    `mapstructure:"bootstrap"`
 	Scaffold     ScaffoldConfig     `mapstructure:"scaffold"`
+}
+
+// BootstrapConfig 启动引导聚合端点配置（#28，F2）。
+// feature_flags 为类型化注册表：max_upload_mb 派生自 llm.max_request_bytes，此处只配 mcp_enabled。
+type BootstrapConfig struct {
+	GatewayVersion string        `mapstructure:"gateway_version"` // 网关版本（报障/兼容判断）
+	MinAppVersion  string        `mapstructure:"min_app_version"` // 最低建议 App 版本（低于视为强更提示）
+	McpEnabled     bool          `mapstructure:"mcp_enabled"`     // feature_flag：E 域 MCP 入口，默认 false
+	Notices        []NoticeEntry `mapstructure:"notices"`         // 运营公告（按窗口过滤后下发）
+}
+
+// NoticeEntry 是一条运营公告。StartsAt/EndsAt 为 0 表示该侧不设边界。
+type NoticeEntry struct {
+	ID       string `mapstructure:"id"`
+	Level    string `mapstructure:"level"` // info | warning | critical
+	Title    string `mapstructure:"title"`
+	Content  string `mapstructure:"content"`
+	StartsAt int64  `mapstructure:"starts_at"` // Unix 秒；未到不展示
+	EndsAt   int64  `mapstructure:"ends_at"`   // Unix 秒；已过不展示
+	URL      string `mapstructure:"url"`
 }
 
 // DistributionConfig 宿主 App 自更新发布清单（#27，F1）。
@@ -184,6 +205,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("llm.max_request_bytes", 25*1024*1024) // 25MB
 	v.SetDefault("llm.credits_per_prompt_token", 1.0)
 	v.SetDefault("llm.credits_per_completion_token", 1.0)
+	v.SetDefault("bootstrap.gateway_version", "0.1.0-dev")
 }
 
 func (c *Configuration) validate() error {
