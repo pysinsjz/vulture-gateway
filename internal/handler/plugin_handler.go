@@ -98,6 +98,18 @@ func (h *PluginHandler) DownloadPluginArtifact(c *gin.Context) {
 	writeDownloadRedirect(c, target)
 }
 
+// PluginSecurity 单查 plugin 版本的安装阻断信号（PluginTrust，blockedFromDownload 权威）。
+//
+//	GET /api/v1/plugins/{name}/versions/{version}/security  (Bearer)
+func (h *PluginHandler) PluginSecurity(c *gin.Context) {
+	trust, err := h.svc.PluginSecurity(c.Request.Context(), c.Param("name"), c.Param("version"))
+	if err != nil {
+		writeClawHubError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, trust)
+}
+
 // writeDownloadRedirect 校验 ClawHub 返回的下载地址后发 302。无效地址收敛为 502，
 // 避免把畸形/内网地址作为 Location 暴露给客户端。
 func writeDownloadRedirect(c *gin.Context, rawURL string) {

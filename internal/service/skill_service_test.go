@@ -16,6 +16,8 @@ type fakeSkills struct {
 	version  *clawhub.SkillVersionDetail
 	resolve  *clawhub.ResolveResult
 	download *clawhub.DownloadTarget
+	verdicts *clawhub.SecurityVerdictResult
+	gotItems []clawhub.VerdictRequestItem
 	gotHash  string
 	err      error
 }
@@ -38,6 +40,10 @@ func (f *fakeSkills) ResolveSkill(_ context.Context, _, hash string) (*clawhub.R
 }
 func (f *fakeSkills) SkillDownloadURL(_ context.Context, _, _ string) (*clawhub.DownloadTarget, error) {
 	return f.download, f.err
+}
+func (f *fakeSkills) SecurityVerdicts(_ context.Context, items []clawhub.VerdictRequestItem) (*clawhub.SecurityVerdictResult, error) {
+	f.gotItems = items
+	return f.verdicts, f.err
 }
 
 // 列表翻译 + X-Platform 平台过滤（metadata.systems）。
@@ -147,6 +153,41 @@ func TestResolveSkill_Translates(t *testing.T) {
 	}
 	if r.LatestVersion == nil || r.LatestVersion.Version != "1.3.0" {
 		t.Errorf("latestVersion 翻译错误: %+v", r.LatestVersion)
+	}
+}
+
+// 批量裁决翻译：schema + items 透传，static scan 信号保留，requestedSlug→slug 映射。
+func TestSecurityVerdicts_Translates(t *testing.T) {
+	fake := &fakeSkills{
+		verdicts: &clawhub.SecurityVerdictResult{
+			Schema: "clawhub.skill.security-verdicts.v1",
+			Items: []clawhub.VerdictItem{
+				{
+					OK: true, Decision: "fail", Reasons: []string{"scan:malicious"},
+					RequestedSlug: "evil", Slug: "evil", RequestedVersion: "1.0.0", Version: "1.0.0",
+					Security: &clawhub.SecurityStatus{Status: "malicious", Passed: false, Signals: &clawhub.SecuritySignals{StaticScan: &clawhub.StaticScan{Status: "fail", ReasonCodes: []string{"eval"}}}},
+				},
+			},
+		},
+	}
+	svc := service.NewSkillService(fake)
+
+	res, err := svc.SecurityVerdicts(context.Background(), []service.VerdictQuery{{Slug: "evil", Version: "1.0.0"}})
+	if err != nil {
+		t.Fatalf("SecurityVerdicts 失败: %v", err)
+	}
+	if len(fake.gotItems) != 1 || fake.gotItems[0].Slug != "evil" {
+		t.Errorf("请求项透传错误: %+v", fake.gotItems)
+	}
+	if res.Schema != "clawhub.skill.security-verdicts.v1" || len(res.Items) != 1 {
+		t.Fatalf("响应形态错误: %+v", res)
+	}
+	it := res.Items[0]
+	if it.Decision != "fail" || it.Security == nil || it.Security.Status != "malicious" {
+		t.Errorf("裁决翻译错误: %+v", it)
+	}
+	if it.Security.Signals == nil || it.Security.Signals.StaticScan == nil || it.Security.Signals.StaticScan.ReasonCodes[0] != "eval" {
+		t.Errorf("static scan 信号翻译错误: %+v", it.Security)
 	}
 }
 

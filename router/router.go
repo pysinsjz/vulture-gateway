@@ -23,6 +23,7 @@ func NewRouter(
 	device *handler.DeviceHandler,
 	plugin *handler.PluginHandler,
 	skill *handler.SkillHandler,
+	telemetry *handler.TelemetryHandler,
 	jwtAuth gin.HandlerFunc,
 ) *gin.Engine {
 	gin.SetMode(ginMode(cfg.Server.Mode))
@@ -64,13 +65,17 @@ func NewRouter(
 		v1.GET("/skills/:slug/versions", skill.ListSkillVersions)
 		v1.GET("/skills/:slug/versions/:version", skill.GetSkillVersion)
 		v1.GET("/skills/:slug/resolve", skill.ResolveSkill)
-		v1.GET("/skills/:slug/download", skill.DownloadSkill) // 302 跳 R2（#21）
+		v1.GET("/skills/:slug/download", skill.DownloadSkill)          // 302 跳 R2（#21）
+		v1.POST("/skills/-/security-verdicts", skill.SecurityVerdicts) // 批量安全裁决（#22）
 		// plugin 族：鉴权后转发内网 ClawHub packages/packageReleases（#19 list 曳光弹 + #20 铺满）。
 		v1.GET("/plugins", plugin.ListPlugins)
 		v1.GET("/plugins/:name", plugin.GetPlugin)
 		v1.GET("/plugins/:name/versions/:version", plugin.GetPluginVersion)
+		v1.GET("/plugins/:name/versions/:version/security", plugin.PluginSecurity)                  // 单查安装阻断（#22）
 		v1.GET("/plugins/:name/download", plugin.DownloadPlugin)                                    // legacy-zip 302（#21）
 		v1.GET("/plugins/:name/versions/:version/artifact/download", plugin.DownloadPluginArtifact) // npm-pack 302（#21）
+		// 安装遥测（#22）：best-effort 转发内网 ClawHub 对账。
+		v1.POST("/telemetry/install", telemetry.ReportInstall)
 	}
 
 	if cfg.Scaffold.Enabled {

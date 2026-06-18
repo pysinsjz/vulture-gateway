@@ -114,6 +114,26 @@ func (h *SkillHandler) DownloadSkill(c *gin.Context) {
 	writeDownloadRedirect(c, target)
 }
 
+// SecurityVerdicts 批量查询 skill 安全裁决（1–100 项）。
+//
+//	POST /api/v1/skills/-/security-verdicts  (Bearer)
+func (h *SkillHandler) SecurityVerdicts(c *gin.Context) {
+	var body struct {
+		Items []service.VerdictQuery `json:"items" binding:"required,min=1,max=100,dive"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		apierror.Abort(c, http.StatusBadRequest, "invalid_request", "items 必须为 1–100 项，每项含 slug 与 version")
+		return
+	}
+
+	res, err := h.svc.SecurityVerdicts(c.Request.Context(), body.Items)
+	if err != nil {
+		writeClawHubError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, res)
+}
+
 // isHex64 校验字符串为 64 位十六进制（指纹格式）。
 func isHex64(s string) bool {
 	if len(s) != 64 {

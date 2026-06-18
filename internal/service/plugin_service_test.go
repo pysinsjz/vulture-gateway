@@ -16,6 +16,7 @@ type fakeClawHub struct {
 	detail     *clawhub.PackageDetail
 	release    *clawhub.PackageReleaseDetail
 	download   *clawhub.DownloadTarget
+	trust      *clawhub.PluginTrust
 	gotVersion string
 	err        error
 }
@@ -41,6 +42,10 @@ func (f *fakeClawHub) PackageDownloadURL(_ context.Context, _, version string) (
 func (f *fakeClawHub) PackageArtifactURL(_ context.Context, _, version string) (*clawhub.DownloadTarget, error) {
 	f.gotVersion = version
 	return f.download, f.err
+}
+
+func (f *fakeClawHub) PackageSecurity(_ context.Context, _, _ string) (*clawhub.PluginTrust, error) {
+	return f.trust, f.err
 }
 
 func boolPtr(b bool) *bool { return &b }
@@ -237,6 +242,32 @@ func TestPluginDownloadURL(t *testing.T) {
 	artURL, err := svc.ArtifactURL(context.Background(), "@v/x", "1.2.0")
 	if err != nil || artURL == "" {
 		t.Errorf("ArtifactURL 失败: url=%q err=%v", artURL, err)
+	}
+}
+
+// PluginTrust 翻译：blockedFromDownload + scanStatus + moderationState 透传。
+func TestPluginSecurity_Translates(t *testing.T) {
+	fake := &fakeClawHub{
+		trust: &clawhub.PluginTrust{
+			Package: clawhub.PluginTrustPkg{Name: "@v/x"},
+			Release: clawhub.PluginTrustRelease{Version: "1.0.0", ArtifactSha256: "abc"},
+			Trust: clawhub.PluginTrustBody{
+				ScanStatus: "malicious", ModerationState: "quarantined",
+				BlockedFromDownload: true, Reasons: []string{"scan:malicious"},
+			},
+		},
+	}
+	svc := service.NewPluginService(fake)
+
+	trust, err := svc.PluginSecurity(context.Background(), "@v/x", "1.0.0")
+	if err != nil {
+		t.Fatalf("PluginSecurity 失败: %v", err)
+	}
+	if !trust.Trust.BlockedFromDownload || trust.Trust.ScanStatus != "malicious" || trust.Trust.ModerationState != "quarantined" {
+		t.Errorf("trust 翻译错误: %+v", trust.Trust)
+	}
+	if trust.Release.ArtifactSha256 != "abc" || trust.Package.Name != "@v/x" {
+		t.Errorf("package/release 翻译错误: %+v", trust)
 	}
 }
 

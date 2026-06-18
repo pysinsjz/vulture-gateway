@@ -2,8 +2,10 @@ package clawhub_test
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/pysinsjz/vulture-gateway/internal/clawhub"
@@ -90,6 +92,73 @@ func TestResolveSkill_SendsHashQuery(t *testing.T) {
 	}
 	if r.Match != nil || r.LatestVersion == nil {
 		t.Errorf("resolve 解析错误: %+v", r)
+	}
+}
+
+// SecurityVerdicts：POST body 透传 items，解析 schema + items。
+func TestSecurityVerdicts_PostsItems(t *testing.T) {
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("期望 POST, 实际 %s", r.Method)
+		}
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"schema":"clawhub.skill.security-verdicts.v1","items":[{"ok":true,"decision":"pass","reasons":[],"requestedSlug":"s","requestedVersion":"1.0.0","security":{"status":"clean","passed":true}}]}`))
+	}))
+	defer srv.Close()
+
+	c := clawhub.NewHTTPClient(srv.URL, srv.Client())
+	res, err := c.SecurityVerdicts(context.Background(), []clawhub.VerdictRequestItem{{Slug: "s", Version: "1.0.0"}})
+	if err != nil {
+		t.Fatalf("SecurityVerdicts 失败: %v", err)
+	}
+	if !strings.Contains(gotBody, `"slug":"s"`) || !strings.Contains(gotBody, `"items"`) {
+		t.Errorf("请求 body 未含 items: %q", gotBody)
+	}
+	if res.Schema == "" || len(res.Items) != 1 || res.Items[0].Decision != "pass" {
+		t.Errorf("响应解析错误: %+v", res)
+	}
+}
+
+// PackageSecurity：GET 单查 PluginTrust，blockedFromDownload 解析。
+func TestPackageSecurity_ParsesTrust(t *testing.T) {
+	stub := newMuxStub(t, map[string]func() (int, string){
+		"/packages/@v/x/releases/1.0.0/security": func() (int, string) {
+			return http.StatusOK, `{"package":{"name":"@v/x"},"release":{"version":"1.0.0","artifactSha256":"abc"},"trust":{"scanStatus":"malicious","blockedFromDownload":true,"reasons":["scan:malicious"]}}`
+		},
+	})
+	c := clawhub.NewHTTPClient(stub.srv.URL, stub.srv.Client())
+
+	trust, err := c.PackageSecurity(context.Background(), "@v/x", "1.0.0")
+	if err != nil {
+		t.Fatalf("PackageSecurity 失败: %v", err)
+	}
+	if !trust.Trust.BlockedFromDownload || trust.Trust.ScanStatus != "malicious" {
+		t.Errorf("trust 解析错误: %+v", trust.Trust)
+	}
+}
+
+// ReportInstall：POST body 透传 roots，2xx 无响应体也不报错。
+func TestReportInstall_PostsRoots(t *testing.T) {
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := clawhub.NewHTTPClient(srv.URL, srv.Client())
+	err := c.ReportInstall(context.Background(), clawhub.TelemetryReport{Roots: []clawhub.TelemetryRoot{
+		{RootID: "root-1", Skills: []clawhub.TelemetrySkill{{Slug: "gifgrep", Version: "1.0.0"}}},
+	}})
+	if err != nil {
+		t.Fatalf("ReportInstall 失败: %v", err)
+	}
+	if !strings.Contains(gotBody, `"rootId":"root-1"`) {
+		t.Errorf("请求 body 未含 roots: %q", gotBody)
 	}
 }
 

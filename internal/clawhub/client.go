@@ -9,6 +9,7 @@
 package clawhub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -31,6 +32,9 @@ type PackagesClient interface {
 	PackageDownloadURL(ctx context.Context, name, version string) (*DownloadTarget, error)
 	// PackageArtifactURL 调用 ClawHub GET /packages/{name}/releases/{version}/artifact-url（npm-pack .tgz）。
 	PackageArtifactURL(ctx context.Context, name, version string) (*DownloadTarget, error)
+	// PackageSecurity 调用 ClawHub GET /packages/{name}/releases/{version}/security，
+	// 返回 PluginTrust（blockedFromDownload 为权威阻断信号，#22）。
+	PackageSecurity(ctx context.Context, name, version string) (*PluginTrust, error)
 }
 
 // SkillsClient 抽象内网 ClawHub 的 skill（skills/skillVersions）只读契约。
@@ -48,12 +52,21 @@ type SkillsClient interface {
 	// SkillDownloadURL 调用 ClawHub GET /skills/{slug}/download-url，ClawHub 内部强制安全门
 	// （decision=fail → 403）+ 签发短时效 URL；version 为空取 latest（#21）。
 	SkillDownloadURL(ctx context.Context, slug, version string) (*DownloadTarget, error)
+	// SecurityVerdicts 调用 ClawHub POST /skills/-/security-verdicts，批量（1–100）返回安全裁决（#22）。
+	SecurityVerdicts(ctx context.Context, items []VerdictRequestItem) (*SecurityVerdictResult, error)
 }
 
-// Client 是两族契约的并集，由真实 httpClient 实现，供 wire 装配后分发给各 service。
+// TelemetryClient 抽象内网 ClawHub 的安装遥测上报契约（§3.8）。
+type TelemetryClient interface {
+	// ReportInstall 调用 ClawHub POST /telemetry/install，按 root 状态快照对账（幂等，#22）。
+	ReportInstall(ctx context.Context, report TelemetryReport) error
+}
+
+// Client 是各族契约的并集，由真实 httpClient 实现，供 wire 装配后分发给各 service。
 type Client interface {
 	PackagesClient
 	SkillsClient
+	TelemetryClient
 }
 
 // PageParams 是纯游标分页参数（版本历史等无 filter 的列表用）。
@@ -112,7 +125,30 @@ func (c *httpClient) get(ctx context.Context, path string, q url.Values, out any
 	if err != nil {
 		return fmt.Errorf("构造 ClawHub 请求失败: %w", err)
 	}
+	return c.doRequest(req, path, out)
+}
 
+// post 是统一的「POST JSON → 校验状态码 →（可选）解码 JSON」transport。out 为 nil 时不解码响应体。
+func (c *httpClient) post(ctx context.Context, path string, reqBody, out any) error {
+	var rdr io.Reader
+	if reqBody != nil {
+		b, err := json.Marshal(reqBody)
+		if err != nil {
+			return fmt.Errorf("序列化 ClawHub 请求体失败: %w", err)
+		}
+		rdr = bytes.NewReader(b)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, rdr)
+	if err != nil {
+		return fmt.Errorf("构造 ClawHub 请求失败: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	return c.doRequest(req, path, out)
+}
+
+// doRequest 执行请求并统一处理响应：非 2xx → *Error；out 非 nil 时解码 JSON。
+func (c *httpClient) doRequest(req *http.Request, path string, out any) error {
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return fmt.Errorf("调用 ClawHub %s 失败: %w", path, err)
@@ -128,6 +164,9 @@ func (c *httpClient) get(ctx context.Context, path string, q url.Values, out any
 		return parseError(resp.StatusCode, body)
 	}
 
+	if out == nil {
+		return nil
+	}
 	if err := json.Unmarshal(body, out); err != nil {
 		return fmt.Errorf("解析 ClawHub %s 响应失败: %w", path, err)
 	}
