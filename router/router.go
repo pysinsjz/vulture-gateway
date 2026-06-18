@@ -21,6 +21,7 @@ func NewRouter(
 	scaffold *handler.ScaffoldHandler,
 	oauth *handler.OAuthHandler,
 	device *handler.DeviceHandler,
+	plugin *handler.PluginHandler,
 	jwtAuth gin.HandlerFunc,
 ) *gin.Engine {
 	gin.SetMode(ginMode(cfg.Server.Mode))
@@ -51,6 +52,8 @@ func NewRouter(
 		v1.POST("/auth/logout", device.Logout)
 		v1.GET("/devices", device.ListDevices)
 		v1.DELETE("/devices/:device_id", device.DeleteDevice)
+		// plugin 列表：鉴权后转发内网 ClawHub /packages（#19 曳光弹；端点翻译铺满见 #20）。
+		v1.GET("/plugins", plugin.ListPlugins)
 	}
 
 	if cfg.Scaffold.Enabled {

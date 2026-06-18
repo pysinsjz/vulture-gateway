@@ -34,6 +34,11 @@ oauth:
     client_secret: ""
     scopes: "openid profile"
 
+# 内网 ClawHub（fork 裁剪版注册中心，ADR-0006）：网关鉴权后转发 skill/plugin 查询。纯内网、无鉴权。
+clawhub:
+  base_url: "http://127.0.0.1:3210"
+  timeout: "10s"
+
 # 脚手架内部签发端点（/__dev/*），仅 dev/test 开启，用于 #9 端到端验证。
 scaffold:
   enabled: true
