@@ -27,12 +27,13 @@ type PostgresConfig struct {
 
 // OAuthConfig 网关作为 OAuth 授权服务器（ADR-0009）的配置。
 type OAuthConfig struct {
-	ClientID       string         `mapstructure:"client_id"`        // 期望的桌面端 client_id，固定 vulture-desktop
-	GatewayBaseURL string         `mapstructure:"gateway_base_url"` // 网关外部基址，用于拼上游回调 URL
-	GWCodeTTL      time.Duration  `mapstructure:"gw_code_ttl"`      // GW_CODE 寿命，默认 60s
-	AuthzTTL       time.Duration  `mapstructure:"authz_ttl"`        // authorize 暂存寿命，默认 10m
-	RefreshTTL     time.Duration  `mapstructure:"refresh_ttl"`      // refresh token 滑动寿命，默认 60d
-	Upstream       UpstreamConfig `mapstructure:"upstream"`
+	ClientID           string         `mapstructure:"client_id"`            // 期望的桌面端 client_id，固定 vulture-desktop
+	GatewayBaseURL     string         `mapstructure:"gateway_base_url"`     // 网关外部基址，用于拼上游回调 URL
+	GWCodeTTL          time.Duration  `mapstructure:"gw_code_ttl"`          // GW_CODE 寿命，默认 60s
+	AuthzTTL           time.Duration  `mapstructure:"authz_ttl"`            // authorize 暂存寿命，默认 10m
+	RefreshTTL         time.Duration  `mapstructure:"refresh_ttl"`          // refresh token 滑动寿命，默认 60d
+	RefreshGraceWindow time.Duration  `mapstructure:"refresh_grace_window"` // refresh 轮换幂等宽限窗，默认 60s
+	Upstream           UpstreamConfig `mapstructure:"upstream"`
 }
 
 // UpstreamConfig 上游 Identity Provider（Casdoor）对接配置。
@@ -120,6 +121,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("oauth.gw_code_ttl", "60s")
 	v.SetDefault("oauth.authz_ttl", "10m")
 	v.SetDefault("oauth.refresh_ttl", "1440h") // 60 天
+	v.SetDefault("oauth.refresh_grace_window", "60s")
 	v.SetDefault("oauth.upstream.mode", "stub")
 	v.SetDefault("oauth.upstream.scopes", "openid profile")
 }
@@ -140,8 +142,8 @@ func (c *Configuration) validate() error {
 	if c.OAuth.GatewayBaseURL == "" {
 		return fmt.Errorf("oauth.gateway_base_url 未配置")
 	}
-	if c.OAuth.GWCodeTTL <= 0 || c.OAuth.AuthzTTL <= 0 || c.OAuth.RefreshTTL <= 0 {
-		return fmt.Errorf("oauth.gw_code_ttl / authz_ttl / refresh_ttl 必须为正")
+	if c.OAuth.GWCodeTTL <= 0 || c.OAuth.AuthzTTL <= 0 || c.OAuth.RefreshTTL <= 0 || c.OAuth.RefreshGraceWindow <= 0 {
+		return fmt.Errorf("oauth.gw_code_ttl / authz_ttl / refresh_ttl / refresh_grace_window 必须为正")
 	}
 	switch c.OAuth.Upstream.Mode {
 	case "stub", "oidc":

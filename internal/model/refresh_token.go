@@ -11,6 +11,7 @@ type RefreshToken struct {
 	DeviceUUID string `json:"device_uuid" gorm:"column:device_uuid;type:varchar(50);not null;index;comment:绑定 Device"`
 	UserUUID   string `json:"user_uuid" gorm:"column:user_uuid;type:varchar(50);not null;index;comment:所属 User"`
 	Used       bool   `json:"used" gorm:"column:used;not null;default:false;comment:是否已被轮换消费"`
+	Revoked    bool   `json:"revoked" gorm:"column:revoked;not null;default:false;comment:家族是否已作废（判盗）"`
 	CreatedAt  int64  `json:"created_at" gorm:"column:created_at;autoCreateTime;comment:创建时间"`
 	LastUsedAt int64  `json:"last_used_at" gorm:"column:last_used_at;comment:最近使用时间（滑动续期基准）"`
 	ExpiresAt  int64  `json:"expires_at" gorm:"column:expires_at;not null;index;comment:过期时间（Unix 秒）"`

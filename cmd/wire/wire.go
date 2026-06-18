@@ -44,13 +44,15 @@ func WireApp(cfg *config.Configuration) (*App, error) {
 	}
 	authzStore := auth.NewAuthzStore(rdb, cfg.OAuth.AuthzTTL)
 	gwCodeStore := auth.NewGWCodeStore(rdb, cfg.OAuth.GWCodeTTL)
+	replayStore := auth.NewRefreshReplayStore(rdb, cfg.OAuth.RefreshGraceWindow)
+	locker := auth.NewLocker(rdb)
 
 	transactor := dao.NewTransactor(gdb)
 	userDAO := dao.NewUserDAO(gdb)
 	deviceDAO := dao.NewDeviceDAO(gdb)
 	refreshDAO := dao.NewRefreshTokenDAO(gdb)
 
-	oauthService := service.NewOAuthService(transactor, deviceDAO, refreshDAO, gwCodeStore, tvs, signer, cfg.OAuth.RefreshTTL)
+	oauthService := service.NewOAuthService(transactor, deviceDAO, refreshDAO, gwCodeStore, tvs, replayStore, locker, signer, cfg.OAuth.RefreshTTL, cfg.OAuth.RefreshGraceWindow)
 
 	jwtAuth := middleware.JWTAuth(signer, tvs, middleware.DefaultPublicPaths)
 

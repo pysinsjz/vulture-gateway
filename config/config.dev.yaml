@@ -24,6 +24,7 @@ oauth:
   gw_code_ttl: "60s"
   authz_ttl: "10m"
   refresh_ttl: "1440h" # 60 天
+  refresh_grace_window: "60s"
   upstream:
     # stub：内置桩上游，#11 本地联调用；真实 Casdoor 待 #10 部署后切 oidc。
     mode: "stub"

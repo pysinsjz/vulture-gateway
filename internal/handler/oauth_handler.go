@@ -165,10 +165,41 @@ func (h *OAuthHandler) Token(c *gin.Context) {
 	case "authorization_code":
 		h.tokenAuthorizationCode(c, req)
 	case "refresh_token":
-		apierror.AbortOAuth(c, http.StatusBadRequest, apierror.OAuthUnsupportedGrantType, "refresh_token 待 #13 实现")
+		h.tokenRefresh(c, req)
 	default:
 		apierror.AbortOAuth(c, http.StatusBadRequest, apierror.OAuthInvalidRequest, "未知 grant_type")
 	}
+}
+
+func (h *OAuthHandler) tokenRefresh(c *gin.Context, req tokenRequest) {
+	if req.ClientID != h.clientID {
+		apierror.AbortOAuth(c, http.StatusBadRequest, apierror.OAuthInvalidClient, "未知 client_id")
+		return
+	}
+	if req.RefreshToken == "" {
+		apierror.AbortOAuth(c, http.StatusBadRequest, apierror.OAuthInvalidRequest, "缺失 refresh_token")
+		return
+	}
+
+	res, err := h.tokenSvc.ExchangeRefreshToken(c.Request.Context(), req.RefreshToken)
+	// 注：refresh 失败按 auth.md / 错误矩阵返回 401（偏离 RFC 6749 的 400），
+	// 使桌面端 401 拦截器触发重登（与 authorization_code 的 400 不同）。
+	if errors.Is(err, service.ErrInvalidGrant) {
+		apierror.AbortOAuth(c, http.StatusUnauthorized, apierror.OAuthInvalidGrant, "refresh token 无效/已过期/已复用")
+		return
+	}
+	if err != nil {
+		apierror.AbortOAuth(c, http.StatusInternalServerError, apierror.OAuthServerError, "刷新失败")
+		return
+	}
+
+	c.JSON(http.StatusOK, tokenResponse{
+		AccessToken:  res.AccessToken,
+		TokenType:    "Bearer",
+		ExpiresIn:    res.ExpiresIn,
+		RefreshToken: res.RefreshToken,
+		DeviceID:     res.DeviceID,
+	})
 }
 
 func (h *OAuthHandler) tokenAuthorizationCode(c *gin.Context, req tokenRequest) {

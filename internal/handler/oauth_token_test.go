@@ -194,13 +194,3 @@ func TestToken_WrongClientID(t *testing.T) {
 	}
 	assertOAuthError(t, rec, "invalid_client")
 }
-
-// grant_type=refresh_token → 400 unsupported_grant_type（待 #13）。
-func TestToken_RefreshGrantUnsupported(t *testing.T) {
-	f := newOAuthFixture(t)
-	rec := f.postJSON(t, "/oauth/token", map[string]any{"grant_type": "refresh_token", "refresh_token": "rt_x", "client_id": "vulture-desktop"})
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("期望 400, 实际 %d", rec.Code)
-	}
-	assertOAuthError(t, rec, "unsupported_grant_type")
-}

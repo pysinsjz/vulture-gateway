@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync"
 	"testing"
 	"time"
 
@@ -73,16 +74,75 @@ func (r *fakeDeviceRepo) Create(_ context.Context, d *model.Device) error {
 	return nil
 }
 
-// fakeRefreshRepo 内存 refresh token 仓。
-type fakeRefreshRepo struct{ created []*model.RefreshToken }
+// fakeRefreshRepo 内存 refresh token 仓（按哈希索引 + 创建序列，线程安全）。
+type fakeRefreshRepo struct {
+	mu           sync.Mutex
+	byHash       map[string]*model.RefreshToken
+	created      []*model.RefreshToken
+	failMarkUsed bool // 置 true 时 MarkUsedIfUnused 恒返回 false，模拟并发竞态败者
+}
+
+func newFakeRefreshRepo() *fakeRefreshRepo {
+	return &fakeRefreshRepo{byHash: map[string]*model.RefreshToken{}}
+}
 
 func (r *fakeRefreshRepo) Create(_ context.Context, rt *model.RefreshToken) error {
-	r.created = append(r.created, rt)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	cp := *rt
+	r.byHash[rt.TokenHash] = &cp
+	r.created = append(r.created, &cp)
 	return nil
+}
+
+func (r *fakeRefreshRepo) FindByHash(_ context.Context, h string) (*model.RefreshToken, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rt, ok := r.byHash[h]
+	if !ok {
+		return nil, false, nil
+	}
+	cp := *rt
+	return &cp, true, nil
+}
+
+func (r *fakeRefreshRepo) MarkUsedIfUnused(_ context.Context, h string) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.failMarkUsed {
+		return false, nil
+	}
+	rt, ok := r.byHash[h]
+	if !ok || rt.Used {
+		return false, nil
+	}
+	rt.Used = true
+	return true, nil
+}
+
+func (r *fakeRefreshRepo) RevokeFamily(_ context.Context, fam string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, rt := range r.byHash {
+		if rt.FamilyID == fam {
+			rt.Revoked = true
+		}
+	}
+	return nil
+}
+
+// inject 直接塞入一条 refresh 记录（测试构造过期/特定状态用）。
+func (r *fakeRefreshRepo) inject(rt *model.RefreshToken) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	cp := *rt
+	r.byHash[rt.TokenHash] = &cp
 }
 
 type oauthFixture struct {
 	engine    *gin.Engine
+	mr        *miniredis.Miniredis
+	rdb       *redis.Client
 	upstream  *fakeUpstream
 	users     *fakeUserRepo
 	gwcodes   *auth.GWCodeStore
@@ -90,7 +150,10 @@ type oauthFixture struct {
 	refreshes *fakeRefreshRepo
 }
 
-const fixtureSecret = "oauth-fixture-secret"
+const (
+	fixtureSecret      = "oauth-fixture-secret"
+	fixtureGraceWindow = 60 * time.Second
+)
 
 func newOAuthFixture(t *testing.T) *oauthFixture {
 	t.Helper()
@@ -106,13 +169,15 @@ func newOAuthFixture(t *testing.T) *oauthFixture {
 	up := &fakeUpstream{}
 	users := newFakeUserRepo()
 	devices := &fakeDeviceRepo{}
-	refreshes := &fakeRefreshRepo{}
+	refreshes := newFakeRefreshRepo()
 	authzStore := auth.NewAuthzStore(rdb, 10*time.Minute)
 	gwStore := auth.NewGWCodeStore(rdb, 60*time.Second)
+	replayStore := auth.NewRefreshReplayStore(rdb, fixtureGraceWindow)
+	locker := auth.NewLocker(rdb)
 
 	signer := auth.NewSigner(config.JWTConfig{Secret: fixtureSecret, Issuer: "vulture-gateway", AccessTTL: 30 * time.Minute})
 	tvs := auth.NewTokenVersionStore(rdb)
-	svc := service.NewOAuthService(fakeTransactor{}, devices, refreshes, gwStore, tvs, signer, 1440*time.Hour)
+	svc := service.NewOAuthService(fakeTransactor{}, devices, refreshes, gwStore, tvs, replayStore, locker, signer, 1440*time.Hour, fixtureGraceWindow)
 
 	h := handler.NewOAuthHandler(up, authzStore, gwStore, users, svc, "vulture-desktop")
 
@@ -126,7 +191,7 @@ func newOAuthFixture(t *testing.T) *oauthFixture {
 	v1.Use(middleware.JWTAuth(signer, tvs, nil))
 	v1.GET("/whoami", probe.Whoami)
 
-	return &oauthFixture{engine: r, upstream: up, users: users, gwcodes: gwStore, devices: devices, refreshes: refreshes}
+	return &oauthFixture{engine: r, mr: mr, rdb: rdb, upstream: up, users: users, gwcodes: gwStore, devices: devices, refreshes: refreshes}
 }
 
 func (f *oauthFixture) get(t *testing.T, path string) *httptest.ResponseRecorder {
