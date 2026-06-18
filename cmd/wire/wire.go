@@ -67,6 +67,14 @@ func WireApp(cfg *config.Configuration) (*App, error) {
 	llmService := service.NewLLMService(llmClient)
 	// 订阅检查为占位（#25）：active = !StubNoSubscription，待计费 C 域接入真实 Subscription。
 	subChecker := service.NewStubSubscriptionChecker(!cfg.LLM.StubNoSubscription)
+	// 计量与额度（#26）：ZSET 双窗（5h/周）+ 占位配额/定价，待计费 C 域接入真实数值。
+	meteringService := service.NewMeteringService(rdb, []service.UsageWindow{
+		{Name: service.Window5h, Size: service.Window5hSize, Cap: cfg.LLM.Window5hCap},
+		{Name: service.WindowWeek, Size: service.WindowWeekSize, Cap: cfg.LLM.WindowWeekCap},
+	}, service.Pricing{
+		PromptCreditPerToken:     cfg.LLM.CreditsPerPromptToken,
+		CompletionCreditPerToken: cfg.LLM.CreditsPerCompletionToken,
+	})
 
 	jwtAuth := middleware.JWTAuth(signer, tvs, middleware.DefaultPublicPaths)
 	jwtAuthLLM := middleware.JWTAuthLLM(signer, tvs, nil)
@@ -78,7 +86,7 @@ func WireApp(cfg *config.Configuration) (*App, error) {
 	pluginHandler := handler.NewPluginHandler(pluginService)
 	skillHandler := handler.NewSkillHandler(skillService)
 	telemetryHandler := handler.NewTelemetryHandler(telemetryService)
-	llmHandler := handler.NewLLMHandler(llmService, subChecker, cfg.LLM.StreamIdleTimeout, cfg.LLM.StreamRequestTimeout, cfg.LLM.MaxRequestBytes)
+	llmHandler := handler.NewLLMHandler(llmService, subChecker, meteringService, cfg.LLM.StreamIdleTimeout, cfg.LLM.StreamRequestTimeout, cfg.LLM.MaxRequestBytes)
 
 	engine := router.NewRouter(cfg, probeHandler, scaffoldHandler, oauthHandler, deviceHandler, pluginHandler, skillHandler, telemetryHandler, llmHandler, jwtAuth, jwtAuthLLM)
 

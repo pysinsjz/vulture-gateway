@@ -47,6 +47,11 @@ llm:
   stream_idle_timeout: "120s"   # 流式推理 chunk 间空闲上限（#24 / ADR-0008）
   stream_request_timeout: "30m" # 流式推理单请求总时长上限（#24 / ADR-0008）
   max_request_bytes: 26214400   # chat 请求体上限 25MB（#25）；>上限 413 request_too_large
+  # 计量与额度（#26 / ADR-0008）。配额/定价为占位，待计费 C 域接入真实数值。
+  window_5h_cap: 0              # 5h 窗 Credit 上限；<=0 不限（占位未配额）
+  window_week_cap: 0            # 周窗 Credit 上限；<=0 不限（占位未配额）
+  credits_per_prompt_token: 1.0
+  credits_per_completion_token: 1.0
 
 # 脚手架内部签发端点（/__dev/*），仅 dev/test 开启，用于 #9 端到端验证。
 scaffold:

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -28,13 +29,14 @@ const (
 type LLMHandler struct {
 	svc             *service.LLMService
 	sub             service.SubscriptionChecker
+	meter           *service.MeteringService
 	idleTimeout     time.Duration // chunk 间空闲上限
 	requestTimeout  time.Duration // 单请求总时长上限
 	maxRequestBytes int64         // chat 请求体上限
 }
 
 // NewLLMHandler 构造 handler。超时/上限来自 LLMConfig，<=0 时回退缺省（120s/30m/25MB）。
-func NewLLMHandler(svc *service.LLMService, sub service.SubscriptionChecker, idleTimeout, requestTimeout time.Duration, maxRequestBytes int64) *LLMHandler {
+func NewLLMHandler(svc *service.LLMService, sub service.SubscriptionChecker, meter *service.MeteringService, idleTimeout, requestTimeout time.Duration, maxRequestBytes int64) *LLMHandler {
 	if idleTimeout <= 0 {
 		idleTimeout = defaultStreamIdleTimeout
 	}
@@ -44,7 +46,7 @@ func NewLLMHandler(svc *service.LLMService, sub service.SubscriptionChecker, idl
 	if maxRequestBytes <= 0 {
 		maxRequestBytes = defaultMaxRequestBytes
 	}
-	return &LLMHandler{svc: svc, sub: sub, idleTimeout: idleTimeout, requestTimeout: requestTimeout, maxRequestBytes: maxRequestBytes}
+	return &LLMHandler{svc: svc, sub: sub, meter: meter, idleTimeout: idleTimeout, requestTimeout: requestTimeout, maxRequestBytes: maxRequestBytes}
 }
 
 // ListModels 代理 litellm 模型列表，脱敏后透传上游状态/体（D1，#23）。
@@ -99,6 +101,12 @@ func (h *LLMHandler) ChatCompletions(c *gin.Context) {
 		return
 	}
 
+	// 门禁 3：窗口预检（429，乐观放行）。任一窗已触顶即拒，附恢复头。Redis 抖动时失败放行（不阻断付费用户）。
+	if pre, perr := h.meter.Precheck(c.Request.Context(), userUUID, time.Now()); perr == nil && pre.Exceeded {
+		writeWindowExceeded(c, pre)
+		return
+	}
+
 	// 总时长上限：绑定到请求 ctx，连接建立与读取整体受 30min 约束；空闲在 PumpStream 内治理。
 	ctx, cancel := context.WithTimeout(c.Request.Context(), h.requestTimeout)
 	defer cancel()
@@ -113,22 +121,61 @@ func (h *LLMHandler) ChatCompletions(c *gin.Context) {
 	// 脱敏头：剥成本敏感 + 逐跳，保留 x-litellm-call-id。
 	litellm.CopySafeHeaders(c.Writer.Header(), res.Header)
 
-	// 非 200（litellm 错误体，OpenAI 形态）或非流式 JSON：缓冲拷贝透传，不做 SSE 泵。
-	if res.Status != http.StatusOK || !isEventStream(res.Header) {
+	// 上游错误（非 200）：原样透传，零计费（硬错误不扣，ADR-0008）。
+	if res.Status != http.StatusOK {
 		c.Status(res.Status)
 		_, _ = io.Copy(c.Writer, res.Body)
 		return
 	}
 
-	// 流式 SSE：落 200 + 头，逐 chunk flush 透传，双超时治理。
+	// 非流式 200 JSON：缓冲透传后按响应体 usage 计量（缺失则估算兜底）。
+	if !isEventStream(res.Header) {
+		respBody, _ := io.ReadAll(res.Body)
+		c.Status(http.StatusOK)
+		_, _ = c.Writer.Write(respBody)
+		usage, completionChars := litellm.UsageFromJSON(respBody)
+		h.recordUsage(userUUID, body, usage, completionChars)
+		return
+	}
+
+	// 流式 SSE：经 SSESniffer 旁路取 usage，落 200 + 头，逐 chunk flush 透传，双超时治理。
 	c.Status(http.StatusOK)
 	flusher, _ := c.Writer.(http.Flusher)
 	var flush func()
 	if flusher != nil {
 		flush = flusher.Flush
 	}
-	// 超时/断流：已写部分即止（头已发，无法改写状态）；按已生成部分计费属 #26。
-	_ = litellm.PumpStream(ctx, c.Writer, flush, res.Body, h.idleTimeout)
+	sniffer := litellm.NewSSESniffer(c.Writer)
+	// 超时/断流：已写部分即止（头已发，无法改写状态）；按已生成部分计费（usage 缺失则估算）。
+	_ = litellm.PumpStream(ctx, sniffer, flush, res.Body, h.idleTimeout)
+	h.recordUsage(userUUID, body, sniffer.Usage(), sniffer.CompletionChars())
+}
+
+// recordUsage 在转发结束后扣减用量：优先用上游 usage，缺失时按 prompt/输出字符数估算兜底（#26）。
+// best-effort：响应已发，扣减失败仅记账丢失、不影响客户端。用独立 ctx，确保客户端断开仍能落账。
+func (h *LLMHandler) recordUsage(userUUID string, reqBody []byte, usage *litellm.Usage, completionChars int) {
+	u := usage
+	if u == nil {
+		est := service.EstimateUsage(service.PromptChars(reqBody), completionChars)
+		u = &est
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = h.meter.Record(ctx, userUUID, *u, time.Now())
+}
+
+// writeWindowExceeded 写入 429 + 恢复头（Retry-After / X-Window-*-Reset，仅触顶窗出现，llm-proxy.md §4）。
+func writeWindowExceeded(c *gin.Context, pre *service.PrecheckResult) {
+	c.Header("Retry-After", strconv.FormatInt(pre.RetryAfter, 10))
+	for _, r := range pre.Resets {
+		switch r.Window {
+		case service.Window5h:
+			c.Header("X-Window-5h-Reset", strconv.FormatInt(r.ResetUnix, 10))
+		case service.WindowWeek:
+			c.Header("X-Window-Week-Reset", strconv.FormatInt(r.ResetUnix, 10))
+		}
+	}
+	apierror.AbortOpenAI(c, http.StatusTooManyRequests, apierror.OpenAITypeRateLimit, "usage_window_exceeded", "Usage window cap reached.")
 }
 
 // abortRequestTooLarge 写入 413 OpenAI 错误体（请求体超上限，llm-proxy.md §5 / #25）。

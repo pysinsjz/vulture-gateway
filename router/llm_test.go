@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -365,7 +366,7 @@ func stubChatJSON(t *testing.T) (*httptest.Server, *int32) {
 		atomic.AddInt32(&hits, 1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"id":"c1","usage":{"total_tokens":3}}`))
+		_, _ = w.Write([]byte(`{"id":"c1","usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}`))
 	}))
 	t.Cleanup(srv.Close)
 	return srv, &hits
@@ -449,5 +450,155 @@ func TestChatCompletions_SubscriptionBeatsTooLarge(t *testing.T) {
 	assertOpenAIError(t, rec, "no_active_subscription")
 	if n := atomic.LoadInt32(hits); n != 0 {
 		t.Errorf("门禁拦截不应转发, 实际命中 %d", n)
+	}
+}
+
+// ===== S4 计量与额度强制（#26）=====
+
+// withLLM5hCap 指向桩并设 5h 窗 Credit 上限（周窗不限）。
+func withLLM5hCap(url string, cap int64) func(*config.Configuration) {
+	return func(cfg *config.Configuration) {
+		cfg.LLM.BaseURL = url
+		cfg.LLM.Window5hCap = cap
+		cfg.LLM.CreditsPerPromptToken = 1
+		cfg.LLM.CreditsPerCompletionToken = 1
+	}
+}
+
+func chatReq() map[string]any {
+	return map[string]any{
+		"model": "gpt-4", "messages": []map[string]string{{"role": "user", "content": "hi"}}, "stream": false,
+	}
+}
+
+// 乐观放行 + 触顶 429：首请求扣满 Cap（单请求可超窗），次请求触顶 429 + 恢复头，且不转发。
+func TestChatCompletions_WindowExceeded429(t *testing.T) {
+	srv, hits := stubChatJSON(t) // 每次 usage=prompt2+completion1 → 3 Credit
+	e := newTestEngine(t, withLLM5hCap(srv.URL, 3))
+	token := issueViaScaffold(t, e, "user-llm", "dev-llm")
+
+	// 首请求：空窗乐观放行（即便本次扣 3 = Cap）。
+	rec1 := do(t, e, http.MethodPost, "/v1/chat/completions", token, chatReq())
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("首请求应放行 200, 实际 %d: %s", rec1.Code, rec1.Body.String())
+	}
+
+	// 次请求：已触顶 → 429 usage_window_exceeded + 恢复头，且不再转发。
+	rec2 := do(t, e, http.MethodPost, "/v1/chat/completions", token, chatReq())
+	if rec2.Code != http.StatusTooManyRequests {
+		t.Fatalf("触顶应 429, 实际 %d: %s", rec2.Code, rec2.Body.String())
+	}
+	assertOpenAIError(t, rec2, "usage_window_exceeded")
+	if rec2.Header().Get("Retry-After") == "" {
+		t.Error("429 应带 Retry-After")
+	}
+	if rec2.Header().Get("X-Window-5h-Reset") == "" {
+		t.Error("5h 窗触顶应带 X-Window-5h-Reset")
+	}
+	if rec2.Header().Get("X-Window-Week-Reset") != "" {
+		t.Error("周窗未配额(不限)不应带 X-Window-Week-Reset")
+	}
+	if n := atomic.LoadInt32(hits); n != 1 {
+		t.Errorf("触顶请求不应转发, litellm 应仅命中 1 次, 实际 %d", n)
+	}
+}
+
+// 错误体可区分：网关触顶 code=usage_window_exceeded / type=rate_limit_error（区别于上游透传限流）。
+func TestChatCompletions_GatewayRateLimitDistinct(t *testing.T) {
+	srv, _ := stubChatJSON(t)
+	e := newTestEngine(t, withLLM5hCap(srv.URL, 3))
+	token := issueViaScaffold(t, e, "user-llm", "dev-llm")
+	_ = do(t, e, http.MethodPost, "/v1/chat/completions", token, chatReq()) // 填满
+	rec := do(t, e, http.MethodPost, "/v1/chat/completions", token, chatReq())
+
+	var oe struct {
+		Error struct{ Type, Code string } `json:"error"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &oe)
+	if oe.Error.Type != "rate_limit_error" || oe.Error.Code != "usage_window_exceeded" {
+		t.Errorf("网关触顶应 type=rate_limit_error/code=usage_window_exceeded, 实际 %+v", oe.Error)
+	}
+}
+
+// usage 缺失 → 估算兜底仍扣费：流式无 usage chunk，估算扣减后次请求触顶。
+func TestChatCompletions_MissingUsageEstimatedDebit(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fl := w.(http.Flusher)
+		sseWrite(w, fl, "data: {\"choices\":[{\"delta\":{\"content\":\"hello world response\"}}]}\n\n")
+		sseWrite(w, fl, "data: [DONE]\n\n") // 无 usage chunk
+	}))
+	t.Cleanup(srv.Close)
+
+	e := newTestEngine(t, withLLM5hCap(srv.URL, 1)) // Cap 极小，任何估算扣减都将触顶
+	token := issueViaScaffold(t, e, "user-llm", "dev-llm")
+
+	body := map[string]any{"model": "gpt-4", "messages": []map[string]string{{"role": "user", "content": "hi"}}, "stream": true}
+	if rec := do(t, e, http.MethodPost, "/v1/chat/completions", token, body); rec.Code != http.StatusOK {
+		t.Fatalf("首请求应放行, 实际 %d", rec.Code)
+	}
+	// 估算已扣费 → 次请求触顶。
+	rec := do(t, e, http.MethodPost, "/v1/chat/completions", token, body)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("usage 缺失应估算扣费致次请求 429, 实际 %d", rec.Code)
+	}
+}
+
+// 硬错误零计费：上游 400 不扣费，后续请求不应因「幽灵扣费」触顶。
+func TestChatCompletions_HardErrorZeroBill(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&calls, 1)
+		if n == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":{"message":"bad","type":"invalid_request_error","code":"x"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"c1","usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	e := newTestEngine(t, withLLM5hCap(srv.URL, 1)) // Cap=1：若 400 误扣费，次请求将 429
+	token := issueViaScaffold(t, e, "user-llm", "dev-llm")
+
+	if rec := do(t, e, http.MethodPost, "/v1/chat/completions", token, chatReq()); rec.Code != http.StatusBadRequest {
+		t.Fatalf("首请求应透传 400, 实际 %d", rec.Code)
+	}
+	// 400 零计费 → 窗口仍空 → 次请求放行（非 429）。
+	rec := do(t, e, http.MethodPost, "/v1/chat/completions", token, chatReq())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("硬错误应零计费, 次请求应放行 200, 实际 %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// 并发原子性：N 并发请求各扣 3 Credit，Cap=N*3 全部放行；第 N+1 次触顶（证明无丢失）。
+func TestChatCompletions_ConcurrentDebitsAtomic(t *testing.T) {
+	const n = 12
+	srv, _ := stubChatJSON(t) // 每次 3 Credit
+	e := newTestEngine(t, withLLM5hCap(srv.URL, n*3))
+	token := issueViaScaffold(t, e, "user-llm", "dev-llm")
+
+	var wg sync.WaitGroup
+	codes := make([]int, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			codes[i] = do(t, e, http.MethodPost, "/v1/chat/completions", token, chatReq()).Code
+		}(i)
+	}
+	wg.Wait()
+	for i, code := range codes {
+		if code != http.StatusOK {
+			t.Errorf("并发第 %d 个应放行 200, 实际 %d", i, code)
+		}
+	}
+	// N 笔扣减全部落账 → 窗满 → 第 N+1 触顶。
+	if rec := do(t, e, http.MethodPost, "/v1/chat/completions", token, chatReq()); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("%d 笔并发扣减后应触顶 429, 实际 %d（疑似丢失扣减）", n, rec.Code)
 	}
 }

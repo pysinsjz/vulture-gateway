@@ -36,6 +36,11 @@ type LLMConfig struct {
 	// StubNoSubscription 占位（#25）：true=桩判定所有用户无有效订阅→402。
 	// TODO(计费 C 域): 待真实 Subscription 接入后移除，订阅状态改为查计费域。
 	StubNoSubscription bool `mapstructure:"stub_no_subscription"`
+	// 计量与额度（#26，ADR-0008）。配额/定价为占位，TODO(计费 C 域)待真实数值接入。
+	Window5hCap               int64   `mapstructure:"window_5h_cap"`                // 5h 窗 Credit 上限；<=0 不限
+	WindowWeekCap             int64   `mapstructure:"window_week_cap"`              // 周窗 Credit 上限；<=0 不限
+	CreditsPerPromptToken     float64 `mapstructure:"credits_per_prompt_token"`     // prompt token→Credit 折算率，默认 1
+	CreditsPerCompletionToken float64 `mapstructure:"credits_per_completion_token"` // completion token→Credit 折算率，默认 1
 }
 
 // ClawHubConfig 内网 ClawHub（fork 裁剪版注册中心，ADR-0006）转发配置。
@@ -156,6 +161,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("llm.stream_idle_timeout", "120s")
 	v.SetDefault("llm.stream_request_timeout", "30m")
 	v.SetDefault("llm.max_request_bytes", 25*1024*1024) // 25MB
+	v.SetDefault("llm.credits_per_prompt_token", 1.0)
+	v.SetDefault("llm.credits_per_completion_token", 1.0)
 }
 
 func (c *Configuration) validate() error {

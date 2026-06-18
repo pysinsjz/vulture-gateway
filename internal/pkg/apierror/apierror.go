@@ -71,6 +71,8 @@ const (
 	OpenAITypeInvalidRequest = "invalid_request_error"
 	// OpenAITypeSubscriptionError 无有效订阅（402，llm-proxy.md §4b）。
 	OpenAITypeSubscriptionError = "subscription_error"
+	// OpenAITypeRateLimit 用量窗口触顶（429，llm-proxy.md §4）。与上游透传限流同形态，code 区分来源。
+	OpenAITypeRateLimit = "rate_limit_error"
 )
 
 // AbortOpenAI 写入状态码 + OpenAIError 并中止 gin 处理链。
