@@ -65,6 +65,8 @@ func WireApp(cfg *config.Configuration) (*App, error) {
 
 	llmClient := litellm.NewHTTPClient(cfg.LLM.BaseURL, cfg.LLM.VirtualKey, &http.Client{Timeout: cfg.LLM.Timeout})
 	llmService := service.NewLLMService(llmClient)
+	// 订阅检查为占位（#25）：active = !StubNoSubscription，待计费 C 域接入真实 Subscription。
+	subChecker := service.NewStubSubscriptionChecker(!cfg.LLM.StubNoSubscription)
 
 	jwtAuth := middleware.JWTAuth(signer, tvs, middleware.DefaultPublicPaths)
 	jwtAuthLLM := middleware.JWTAuthLLM(signer, tvs, nil)
@@ -76,7 +78,7 @@ func WireApp(cfg *config.Configuration) (*App, error) {
 	pluginHandler := handler.NewPluginHandler(pluginService)
 	skillHandler := handler.NewSkillHandler(skillService)
 	telemetryHandler := handler.NewTelemetryHandler(telemetryService)
-	llmHandler := handler.NewLLMHandler(llmService, cfg.LLM.StreamIdleTimeout, cfg.LLM.StreamRequestTimeout)
+	llmHandler := handler.NewLLMHandler(llmService, subChecker, cfg.LLM.StreamIdleTimeout, cfg.LLM.StreamRequestTimeout, cfg.LLM.MaxRequestBytes)
 
 	engine := router.NewRouter(cfg, probeHandler, scaffoldHandler, oauthHandler, deviceHandler, pluginHandler, skillHandler, telemetryHandler, llmHandler, jwtAuth, jwtAuthLLM)
 

@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -10,33 +11,40 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/pysinsjz/vulture-gateway/internal/litellm"
+	"github.com/pysinsjz/vulture-gateway/internal/middleware"
 	"github.com/pysinsjz/vulture-gateway/internal/pkg/apierror"
 	"github.com/pysinsjz/vulture-gateway/internal/service"
 )
 
-// 流式双超时缺省值（config 未配时回退，ADR-0008 / #24）。
+// 缺省值（config 未配时回退）。
 const (
-	defaultStreamIdleTimeout    = 120 * time.Second
-	defaultStreamRequestTimeout = 30 * time.Minute
+	defaultStreamIdleTimeout    = 120 * time.Second // chunk 间空闲上限（ADR-0008 / #24）
+	defaultStreamRequestTimeout = 30 * time.Minute  // 单请求总时长上限（ADR-0008 / #24）
+	defaultMaxRequestBytes      = 25 * 1024 * 1024  // chat 请求体上限 25MB（#25）
 )
 
 // LLMHandler 实现 LLM 代理域（/v1/*，OpenAI 兼容，#23 起）。
 // 鉴权由 JWTAuthLLM 完成；错误体全线 OpenAI 形态 {error:{message,type,code}}（#15 基座）。
 type LLMHandler struct {
-	svc            *service.LLMService
-	idleTimeout    time.Duration // chunk 间空闲上限
-	requestTimeout time.Duration // 单请求总时长上限
+	svc             *service.LLMService
+	sub             service.SubscriptionChecker
+	idleTimeout     time.Duration // chunk 间空闲上限
+	requestTimeout  time.Duration // 单请求总时长上限
+	maxRequestBytes int64         // chat 请求体上限
 }
 
-// NewLLMHandler 构造 handler。idle/request 超时来自 LLMConfig，<=0 时回退缺省（120s/30m）。
-func NewLLMHandler(svc *service.LLMService, idleTimeout, requestTimeout time.Duration) *LLMHandler {
+// NewLLMHandler 构造 handler。超时/上限来自 LLMConfig，<=0 时回退缺省（120s/30m/25MB）。
+func NewLLMHandler(svc *service.LLMService, sub service.SubscriptionChecker, idleTimeout, requestTimeout time.Duration, maxRequestBytes int64) *LLMHandler {
 	if idleTimeout <= 0 {
 		idleTimeout = defaultStreamIdleTimeout
 	}
 	if requestTimeout <= 0 {
 		requestTimeout = defaultStreamRequestTimeout
 	}
-	return &LLMHandler{svc: svc, idleTimeout: idleTimeout, requestTimeout: requestTimeout}
+	if maxRequestBytes <= 0 {
+		maxRequestBytes = defaultMaxRequestBytes
+	}
+	return &LLMHandler{svc: svc, sub: sub, idleTimeout: idleTimeout, requestTimeout: requestTimeout, maxRequestBytes: maxRequestBytes}
 }
 
 // ListModels 代理 litellm 模型列表，脱敏后透传上游状态/体（D1，#23）。
@@ -60,10 +68,33 @@ func (h *LLMHandler) ListModels(c *gin.Context) {
 //
 //	POST /v1/chat/completions  (Bearer)
 //
-// 乐观放行（默认通过）；订阅门禁(402)/限额(429)/请求体上限(413)属 #25/#26，本切片不做。
+// 前置门禁顺序（#25，固化处理顺序契约）：鉴权(中间件) → 订阅检查(402) → 请求体上限(413) →
+// 窗口预检(429, #26) → 转发。无订阅 / 超大请求绝不转发到 litellm。窗口预检在 #26 接入，置于此后。
 func (h *LLMHandler) ChatCompletions(c *gin.Context) {
-	body, err := io.ReadAll(c.Request.Body)
+	// 门禁 1：订阅检查（402）。先于体积与转发——账号级总闸，无需读 body。
+	userUUID := c.GetString(middleware.CtxKeySub)
+	active, err := h.sub.HasActiveSubscription(c.Request.Context(), userUUID)
 	if err != nil {
+		apierror.AbortOpenAI(c, http.StatusBadGateway, apierror.OpenAITypeInvalidRequest, "subscription_check_failed", "订阅状态暂不可用")
+		return
+	}
+	if !active {
+		apierror.AbortOpenAI(c, http.StatusPaymentRequired, apierror.OpenAITypeSubscriptionError, "no_active_subscription", "No active subscription. Subscribe to a plan to use the model.")
+		return
+	}
+
+	// 门禁 2：请求体上限（413）。先按 Content-Length 快判，再以 MaxBytesReader 兜底（防缺失/伪造 Content-Length）。
+	if c.Request.ContentLength > h.maxRequestBytes {
+		h.abortRequestTooLarge(c)
+		return
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, h.maxRequestBytes))
+	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			h.abortRequestTooLarge(c)
+			return
+		}
 		apierror.AbortOpenAI(c, http.StatusBadRequest, apierror.OpenAITypeInvalidRequest, "invalid_request_error", "无法读取请求体")
 		return
 	}
@@ -98,6 +129,11 @@ func (h *LLMHandler) ChatCompletions(c *gin.Context) {
 	}
 	// 超时/断流：已写部分即止（头已发，无法改写状态）；按已生成部分计费属 #26。
 	_ = litellm.PumpStream(ctx, c.Writer, flush, res.Body, h.idleTimeout)
+}
+
+// abortRequestTooLarge 写入 413 OpenAI 错误体（请求体超上限，llm-proxy.md §5 / #25）。
+func (h *LLMHandler) abortRequestTooLarge(c *gin.Context) {
+	apierror.AbortOpenAI(c, http.StatusRequestEntityTooLarge, apierror.OpenAITypeInvalidRequest, "request_too_large", "请求体超过上限")
 }
 
 // isEventStream 判定上游响应是否为 SSE 流（Content-Type: text/event-stream）。

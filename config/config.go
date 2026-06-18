@@ -31,6 +31,11 @@ type LLMConfig struct {
 	// 以下为流式推理（/v1/chat/completions，#24）双超时（ADR-0008）：
 	StreamIdleTimeout    time.Duration `mapstructure:"stream_idle_timeout"`    // chunk 间空闲上限，默认 120s
 	StreamRequestTimeout time.Duration `mapstructure:"stream_request_timeout"` // 单请求总时长上限，默认 30m
+	// 前置门禁（#25）：
+	MaxRequestBytes int64 `mapstructure:"max_request_bytes"` // chat 请求体上限（含多模态 base64），默认 25MB；>上限 413
+	// StubNoSubscription 占位（#25）：true=桩判定所有用户无有效订阅→402。
+	// TODO(计费 C 域): 待真实 Subscription 接入后移除，订阅状态改为查计费域。
+	StubNoSubscription bool `mapstructure:"stub_no_subscription"`
 }
 
 // ClawHubConfig 内网 ClawHub（fork 裁剪版注册中心，ADR-0006）转发配置。
@@ -150,6 +155,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("llm.timeout", "30s")
 	v.SetDefault("llm.stream_idle_timeout", "120s")
 	v.SetDefault("llm.stream_request_timeout", "30m")
+	v.SetDefault("llm.max_request_bytes", 25*1024*1024) // 25MB
 }
 
 func (c *Configuration) validate() error {

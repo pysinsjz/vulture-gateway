@@ -69,6 +69,8 @@ type OpenAIErrorBody struct {
 // OpenAI 错误 type 常量。
 const (
 	OpenAITypeInvalidRequest = "invalid_request_error"
+	// OpenAITypeSubscriptionError 无有效订阅（402，llm-proxy.md §4b）。
+	OpenAITypeSubscriptionError = "subscription_error"
 )
 
 // AbortOpenAI 写入状态码 + OpenAIError 并中止 gin 处理链。

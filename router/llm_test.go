@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -336,4 +337,117 @@ func TestChatCompletions_NoTokenUnauthorized(t *testing.T) {
 		t.Fatalf("无 token 期望 401, 实际 %d", rec.Code)
 	}
 	assertOpenAIError(t, rec, "unauthorized")
+}
+
+// ===== S3 前置门禁（#25）=====
+
+// withLLMNoSub 指向桩并令占位订阅检查判「无有效订阅」。
+func withLLMNoSub(url string) func(*config.Configuration) {
+	return func(cfg *config.Configuration) {
+		cfg.LLM.BaseURL = url
+		cfg.LLM.StubNoSubscription = true
+	}
+}
+
+// withLLMMaxBytes 指向桩并设请求体上限，便于 413 边界测试（避免造 25MB 大 body）。
+func withLLMMaxBytes(url string, max int64) func(*config.Configuration) {
+	return func(cfg *config.Configuration) {
+		cfg.LLM.BaseURL = url
+		cfg.LLM.MaxRequestBytes = max
+	}
+}
+
+// stubChatJSON 返回非流式 JSON 200 的桩 litellm，并记录命中次数（验证门禁是否拦在转发前）。
+func stubChatJSON(t *testing.T) (*httptest.Server, *int32) {
+	t.Helper()
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"c1","usage":{"total_tokens":3}}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &hits
+}
+
+// 无活跃订阅 → 402 no_active_subscription，且请求不转发到 litellm（订阅先于转发）。
+func TestChatCompletions_NoSubscription402NotForwarded(t *testing.T) {
+	srv, hits := stubChatJSON(t)
+	e := newTestEngine(t, withLLMNoSub(srv.URL))
+	token := issueViaScaffold(t, e, "user-llm", "dev-llm")
+
+	rec := do(t, e, http.MethodPost, "/v1/chat/completions", token, map[string]any{
+		"model": "gpt-4", "messages": []map[string]string{{"role": "user", "content": "hi"}}, "stream": true,
+	})
+	if rec.Code != http.StatusPaymentRequired {
+		t.Fatalf("无订阅期望 402, 实际 %d: %s", rec.Code, rec.Body.String())
+	}
+	assertOpenAIError(t, rec, "no_active_subscription")
+	if n := atomic.LoadInt32(hits); n != 0 {
+		t.Errorf("无订阅不应转发到 litellm, 实际命中 %d 次", n)
+	}
+}
+
+// 请求体 >上限 → 413 request_too_large，且不转发。
+func TestChatCompletions_RequestTooLarge413(t *testing.T) {
+	srv, hits := stubChatJSON(t)
+	bodyMap := map[string]any{
+		"model": "gpt-4", "messages": []map[string]string{{"role": "user", "content": "hello world"}}, "stream": false,
+	}
+	raw, _ := json.Marshal(bodyMap)
+	e := newTestEngine(t, withLLMMaxBytes(srv.URL, int64(len(raw))-1)) // 上限比实际小 1 字节
+	token := issueViaScaffold(t, e, "user-llm", "dev-llm")
+
+	rec := do(t, e, http.MethodPost, "/v1/chat/completions", token, bodyMap)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("超限期望 413, 实际 %d: %s", rec.Code, rec.Body.String())
+	}
+	assertOpenAIError(t, rec, "request_too_large")
+	if n := atomic.LoadInt32(hits); n != 0 {
+		t.Errorf("超限不应转发, 实际命中 %d", n)
+	}
+}
+
+// 恰好等于上限 → 放行（边界：25MB 含义为 <=上限放行、>上限拒）。
+func TestChatCompletions_ExactlyAtLimitAllowed(t *testing.T) {
+	srv, hits := stubChatJSON(t)
+	bodyMap := map[string]any{
+		"model": "gpt-4", "messages": []map[string]string{{"role": "user", "content": "hello world"}}, "stream": false,
+	}
+	raw, _ := json.Marshal(bodyMap)
+	e := newTestEngine(t, withLLMMaxBytes(srv.URL, int64(len(raw)))) // 恰好等于实际体积
+	token := issueViaScaffold(t, e, "user-llm", "dev-llm")
+
+	rec := do(t, e, http.MethodPost, "/v1/chat/completions", token, bodyMap)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("恰好达上限应放行(200), 实际 %d: %s", rec.Code, rec.Body.String())
+	}
+	if n := atomic.LoadInt32(hits); n != 1 {
+		t.Errorf("恰好达上限应转发一次, 实际命中 %d", n)
+	}
+}
+
+// 顺序契约：无订阅 + 超大请求同时触发 → 402 优先（订阅先于体积）。
+func TestChatCompletions_SubscriptionBeatsTooLarge(t *testing.T) {
+	srv, hits := stubChatJSON(t)
+	bodyMap := map[string]any{
+		"model": "gpt-4", "messages": []map[string]string{{"role": "user", "content": "hello world"}},
+	}
+	raw, _ := json.Marshal(bodyMap)
+	e := newTestEngine(t, func(cfg *config.Configuration) {
+		cfg.LLM.BaseURL = srv.URL
+		cfg.LLM.StubNoSubscription = true             // 无订阅
+		cfg.LLM.MaxRequestBytes = int64(len(raw)) - 1 // 且超限
+	})
+	token := issueViaScaffold(t, e, "user-llm", "dev-llm")
+
+	rec := do(t, e, http.MethodPost, "/v1/chat/completions", token, bodyMap)
+	if rec.Code != http.StatusPaymentRequired {
+		t.Fatalf("订阅应先于体积, 期望 402, 实际 %d: %s", rec.Code, rec.Body.String())
+	}
+	assertOpenAIError(t, rec, "no_active_subscription")
+	if n := atomic.LoadInt32(hits); n != 0 {
+		t.Errorf("门禁拦截不应转发, 实际命中 %d", n)
+	}
 }
