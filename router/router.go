@@ -20,6 +20,7 @@ func NewRouter(
 	probe *handler.ProbeHandler,
 	scaffold *handler.ScaffoldHandler,
 	oauth *handler.OAuthHandler,
+	device *handler.DeviceHandler,
 	jwtAuth gin.HandlerFunc,
 ) *gin.Engine {
 	gin.SetMode(ginMode(cfg.Server.Mode))
@@ -43,9 +44,13 @@ func NewRouter(
 	v1.Use(jwtAuth)
 	{
 		v1.GET("/whoami", probe.Whoami)
-		// 公开例外：JWTAuth 放行（见 middleware.DefaultPublicPaths），属其它域的占位实现。
+		// 公开例外：JWTAuth 放行（见 middleware.DefaultPublicPaths）。
 		v1.GET("/bootstrap", probe.BootstrapStub)
 		v1.GET("/app/latest", probe.AppLatestStub)
+		// logout 自带鉴权（公开例外）；devices 需 Bearer。
+		v1.POST("/auth/logout", device.Logout)
+		v1.GET("/devices", device.ListDevices)
+		v1.DELETE("/devices/:device_id", device.DeleteDevice)
 	}
 
 	if cfg.Scaffold.Enabled {

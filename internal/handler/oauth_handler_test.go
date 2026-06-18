@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -66,11 +67,61 @@ func (fakeTransactor) WithinTx(ctx context.Context, fn func(ctx context.Context)
 	return fn(ctx)
 }
 
-// fakeDeviceRepo 内存 Device 仓。
-type fakeDeviceRepo struct{ created []*model.Device }
+// fakeDeviceRepo 内存 Device 仓（按 uuid 索引，线程安全）。
+type fakeDeviceRepo struct {
+	mu                sync.Mutex
+	byUUID            map[string]*model.Device
+	created           []*model.Device
+	lastActiveUpdates int
+}
+
+func newFakeDeviceRepo() *fakeDeviceRepo {
+	return &fakeDeviceRepo{byUUID: map[string]*model.Device{}}
+}
 
 func (r *fakeDeviceRepo) Create(_ context.Context, d *model.Device) error {
-	r.created = append(r.created, d)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	cp := *d
+	if cp.CreatedAt == 0 {
+		cp.CreatedAt = cp.LastActiveAt
+	}
+	r.byUUID[d.UUID] = &cp
+	r.created = append(r.created, &cp)
+	return nil
+}
+
+func (r *fakeDeviceRepo) ListByUser(_ context.Context, userUUID string) ([]model.Device, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []model.Device
+	for _, d := range r.byUUID {
+		if d.UserUUID == userUUID {
+			out = append(out, *d)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt < out[j].CreatedAt })
+	return out, nil
+}
+
+func (r *fakeDeviceRepo) GetByUUID(_ context.Context, uuid string) (*model.Device, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	d, ok := r.byUUID[uuid]
+	if !ok {
+		return nil, false, nil
+	}
+	cp := *d
+	return &cp, true, nil
+}
+
+func (r *fakeDeviceRepo) UpdateLastActive(_ context.Context, uuid string, ts int64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if d, ok := r.byUUID[uuid]; ok {
+		d.LastActiveAt = ts
+	}
+	r.lastActiveUpdates++
 	return nil
 }
 
@@ -131,6 +182,17 @@ func (r *fakeRefreshRepo) RevokeFamily(_ context.Context, fam string) error {
 	return nil
 }
 
+func (r *fakeRefreshRepo) RevokeByDevice(_ context.Context, dev string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, rt := range r.byHash {
+		if rt.DeviceUUID == dev {
+			rt.Revoked = true
+		}
+	}
+	return nil
+}
+
 // inject 直接塞入一条 refresh 记录（测试构造过期/特定状态用）。
 func (r *fakeRefreshRepo) inject(rt *model.RefreshToken) {
 	r.mu.Lock()
@@ -168,7 +230,7 @@ func newOAuthFixture(t *testing.T) *oauthFixture {
 
 	up := &fakeUpstream{}
 	users := newFakeUserRepo()
-	devices := &fakeDeviceRepo{}
+	devices := newFakeDeviceRepo()
 	refreshes := newFakeRefreshRepo()
 	authzStore := auth.NewAuthzStore(rdb, 10*time.Minute)
 	gwStore := auth.NewGWCodeStore(rdb, 60*time.Second)
@@ -178,18 +240,23 @@ func newOAuthFixture(t *testing.T) *oauthFixture {
 	signer := auth.NewSigner(config.JWTConfig{Secret: fixtureSecret, Issuer: "vulture-gateway", AccessTTL: 30 * time.Minute})
 	tvs := auth.NewTokenVersionStore(rdb)
 	svc := service.NewOAuthService(fakeTransactor{}, devices, refreshes, gwStore, tvs, replayStore, locker, signer, 1440*time.Hour, fixtureGraceWindow)
+	deviceSvc := service.NewDeviceService(tvs, devices, refreshes)
 
 	h := handler.NewOAuthHandler(up, authzStore, gwStore, users, svc, "vulture-desktop")
+	dh := handler.NewDeviceHandler(signer, deviceSvc)
 
 	r := gin.New()
 	r.GET("/oauth/authorize", h.Authorize)
 	r.GET("/oauth/callback/casdoor", h.Callback)
 	r.POST("/oauth/token", h.Token)
-	// 受保护探针，用于验证换得的 access JWT 能跑通 JWTAuth（首次登录闭环）。
+	// 管理 API 组：whoami（探针）+ A3 logout/devices。logout 走公开例外（自带鉴权）。
 	probe := handler.NewProbeHandler()
 	v1 := r.Group("/api/v1")
-	v1.Use(middleware.JWTAuth(signer, tvs, nil))
+	v1.Use(middleware.JWTAuth(signer, tvs, middleware.DefaultPublicPaths))
 	v1.GET("/whoami", probe.Whoami)
+	v1.POST("/auth/logout", dh.Logout)
+	v1.GET("/devices", dh.ListDevices)
+	v1.DELETE("/devices/:device_id", dh.DeleteDevice)
 
 	return &oauthFixture{engine: r, mr: mr, rdb: rdb, upstream: up, users: users, gwcodes: gwStore, devices: devices, refreshes: refreshes}
 }

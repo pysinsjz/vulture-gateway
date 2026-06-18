@@ -21,6 +21,8 @@ type RefreshTokenRepository interface {
 	MarkUsedIfUnused(ctx context.Context, tokenHash string) (flipped bool, err error)
 	// RevokeFamily 作废整个轮换家族（判盗）。
 	RevokeFamily(ctx context.Context, familyID string) error
+	// RevokeByDevice 作废某 Device 的全部 refresh（登出/吊销设备）。
+	RevokeByDevice(ctx context.Context, deviceUUID string) error
 }
 
 type refreshTokenDAO struct {
@@ -66,6 +68,15 @@ func (d *refreshTokenDAO) RevokeFamily(ctx context.Context, familyID string) err
 		Where("family_id = ?", familyID).
 		Update("revoked", true).Error; err != nil {
 		return fmt.Errorf("作废 refresh 家族失败: %w", err)
+	}
+	return nil
+}
+
+func (d *refreshTokenDAO) RevokeByDevice(ctx context.Context, deviceUUID string) error {
+	if err := dbFrom(ctx, d.db).Model(&model.RefreshToken{}).
+		Where("device_uuid = ?", deviceUUID).
+		Update("revoked", true).Error; err != nil {
+		return fmt.Errorf("按 Device 作废 refresh 失败: %w", err)
 	}
 	return nil
 }

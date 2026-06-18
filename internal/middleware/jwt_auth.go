@@ -18,10 +18,12 @@ const (
 )
 
 // DefaultPublicPaths 是 JWTAuth 的公开例外路径（不要求 Bearer）。
-// 这两端点本身属其它域（bootstrap / distribution），本切片仅在中间件层预留放行。
+// bootstrap / app/latest 属其它域；auth/logout 自带鉴权（Bearer 或 body refresh_token 兜底，#14），
+// 故在中间件层放行、由 handler 内部自校验。
 var DefaultPublicPaths = []string{
 	"/api/v1/bootstrap",
 	"/api/v1/app/latest",
+	"/api/v1/auth/logout",
 }
 
 // JWTAuth 校验 access JWT 并执行即时吊销比对（ADR-0010）。
@@ -43,7 +45,7 @@ func JWTAuth(verifier *auth.Signer, tvs *auth.TokenVersionStore, publicPaths []s
 			return
 		}
 
-		raw, ok := bearerToken(c)
+		raw, ok := BearerToken(c)
 		if !ok {
 			apierror.Abort(c, http.StatusUnauthorized, apierror.CodeUnauthorized, "缺失或格式错误的 Authorization 头")
 			return
@@ -71,8 +73,8 @@ func JWTAuth(verifier *auth.Signer, tvs *auth.TokenVersionStore, publicPaths []s
 	}
 }
 
-// bearerToken 从 Authorization 头提取 Bearer token。
-func bearerToken(c *gin.Context) (string, bool) {
+// BearerToken 从 Authorization 头提取 Bearer token。
+func BearerToken(c *gin.Context) (string, bool) {
 	h := c.GetHeader("Authorization")
 	if h == "" {
 		return "", false

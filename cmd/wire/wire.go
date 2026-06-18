@@ -53,14 +53,16 @@ func WireApp(cfg *config.Configuration) (*App, error) {
 	refreshDAO := dao.NewRefreshTokenDAO(gdb)
 
 	oauthService := service.NewOAuthService(transactor, deviceDAO, refreshDAO, gwCodeStore, tvs, replayStore, locker, signer, cfg.OAuth.RefreshTTL, cfg.OAuth.RefreshGraceWindow)
+	deviceService := service.NewDeviceService(tvs, deviceDAO, refreshDAO)
 
 	jwtAuth := middleware.JWTAuth(signer, tvs, middleware.DefaultPublicPaths)
 
 	probeHandler := handler.NewProbeHandler()
 	scaffoldHandler := handler.NewScaffoldHandler(signer, tvs)
 	oauthHandler := handler.NewOAuthHandler(upstream, authzStore, gwCodeStore, userDAO, oauthService, cfg.OAuth.ClientID)
+	deviceHandler := handler.NewDeviceHandler(signer, deviceService)
 
-	engine := router.NewRouter(cfg, probeHandler, scaffoldHandler, oauthHandler, jwtAuth)
+	engine := router.NewRouter(cfg, probeHandler, scaffoldHandler, oauthHandler, deviceHandler, jwtAuth)
 
 	return &App{Engine: engine, Redis: rdb, DB: gdb}, nil
 }

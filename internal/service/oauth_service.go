@@ -226,7 +226,11 @@ func (s *OAuthService) rotate(ctx context.Context, oldHash string, row *model.Re
 		if !flipped {
 			return errAlreadyUsed
 		}
-		return s.refreshes.Create(ctx, newRow)
+		if err := s.refreshes.Create(ctx, newRow); err != nil {
+			return err
+		}
+		// last_active_at 随刷新更新（#14）。
+		return s.devices.UpdateLastActive(ctx, row.DeviceUUID, now.Unix())
 	}); err != nil {
 		if errors.Is(err, errAlreadyUsed) {
 			// 并发已轮换（锁失效兜底）：退回重放。
