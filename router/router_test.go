@@ -19,8 +19,9 @@ import (
 
 const testSecret = "contract-test-secret"
 
-// newTestEngine 用 miniredis 装配一套完整引擎（开启脚手架端点），返回引擎与 redis 地址。
-func newTestEngine(t *testing.T) *gin.Engine {
+// newTestEngine 用 miniredis 装配一套完整引擎（开启脚手架端点），返回引擎。
+// opts 可在装配前微调配置（如把 ClawHub 基址指向 httptest 桩，见 plugin_test.go）。
+func newTestEngine(t *testing.T, opts ...func(*config.Configuration)) *gin.Engine {
 	t.Helper()
 	mr, err := miniredis.Run()
 	if err != nil {
@@ -41,7 +42,12 @@ func newTestEngine(t *testing.T) *gin.Engine {
 			AuthzTTL:       10 * time.Minute,
 			Upstream:       config.UpstreamConfig{Mode: "stub", AuthorizeURL: "http://127.0.0.1:8080/oauth/_stub/authorize", ClientID: "vulture-gateway", Scopes: "openid profile"},
 		},
+		// 默认指向不可达基址；未调 /plugins 的用例不会触达。需正路的用例用 opts 覆盖为桩 URL。
+		ClawHub:  config.ClawHubConfig{BaseURL: "http://127.0.0.1:1", Timeout: 5 * time.Second},
 		Scaffold: config.ScaffoldConfig{Enabled: true},
+	}
+	for _, o := range opts {
+		o(cfg)
 	}
 	app, err := wire.WireApp(cfg)
 	if err != nil {

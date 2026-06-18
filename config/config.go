@@ -17,7 +17,15 @@ type Configuration struct {
 	Postgres PostgresConfig `mapstructure:"postgres"`
 	JWT      JWTConfig      `mapstructure:"jwt"`
 	OAuth    OAuthConfig    `mapstructure:"oauth"`
+	ClawHub  ClawHubConfig  `mapstructure:"clawhub"`
 	Scaffold ScaffoldConfig `mapstructure:"scaffold"`
+}
+
+// ClawHubConfig 内网 ClawHub（fork 裁剪版注册中心，ADR-0006）转发配置。
+// ClawHub 纯内网、无鉴权；网关鉴权后转发 skill/plugin 查询到此基址。
+type ClawHubConfig struct {
+	BaseURL string        `mapstructure:"base_url"` // 内网基址，如 http://clawhub.internal:3210
+	Timeout time.Duration `mapstructure:"timeout"`  // 转发请求超时，默认 10s
 }
 
 // PostgresConfig 数据库连接（ADR-0001：用 PostgreSQL，非 web-go 默认的 MySQL）。
@@ -124,6 +132,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("oauth.refresh_grace_window", "60s")
 	v.SetDefault("oauth.upstream.mode", "stub")
 	v.SetDefault("oauth.upstream.scopes", "openid profile")
+	v.SetDefault("clawhub.base_url", "http://127.0.0.1:3210")
+	v.SetDefault("clawhub.timeout", "10s")
 }
 
 func (c *Configuration) validate() error {
@@ -149,6 +159,12 @@ func (c *Configuration) validate() error {
 	case "stub", "oidc":
 	default:
 		return fmt.Errorf("oauth.upstream.mode 必须为 stub 或 oidc，当前 %q", c.OAuth.Upstream.Mode)
+	}
+	if c.ClawHub.BaseURL == "" {
+		return fmt.Errorf("clawhub.base_url 未配置")
+	}
+	if c.ClawHub.Timeout <= 0 {
+		return fmt.Errorf("clawhub.timeout 必须为正，当前 %s", c.ClawHub.Timeout)
 	}
 	return nil
 }

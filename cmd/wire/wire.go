@@ -3,6 +3,7 @@ package wire
 
 import (
 	"fmt"
+	"net/http"
 
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/pysinsjz/vulture-gateway/config"
 	"github.com/pysinsjz/vulture-gateway/internal/auth"
+	"github.com/pysinsjz/vulture-gateway/internal/clawhub"
 	"github.com/pysinsjz/vulture-gateway/internal/dao"
 	"github.com/pysinsjz/vulture-gateway/internal/db"
 	"github.com/pysinsjz/vulture-gateway/internal/handler"
@@ -55,14 +57,22 @@ func WireApp(cfg *config.Configuration) (*App, error) {
 	oauthService := service.NewOAuthService(transactor, deviceDAO, refreshDAO, gwCodeStore, tvs, replayStore, locker, signer, cfg.OAuth.RefreshTTL, cfg.OAuth.RefreshGraceWindow)
 	deviceService := service.NewDeviceService(tvs, deviceDAO, refreshDAO)
 
+	clawHubClient := clawhub.NewHTTPClient(cfg.ClawHub.BaseURL, &http.Client{Timeout: cfg.ClawHub.Timeout})
+	pluginService := service.NewPluginService(clawHubClient)
+	skillService := service.NewSkillService(clawHubClient)
+	telemetryService := service.NewTelemetryService(clawHubClient)
+
 	jwtAuth := middleware.JWTAuth(signer, tvs, middleware.DefaultPublicPaths)
 
 	probeHandler := handler.NewProbeHandler()
 	scaffoldHandler := handler.NewScaffoldHandler(signer, tvs)
 	oauthHandler := handler.NewOAuthHandler(upstream, authzStore, gwCodeStore, userDAO, oauthService, cfg.OAuth.ClientID)
 	deviceHandler := handler.NewDeviceHandler(signer, deviceService)
+	pluginHandler := handler.NewPluginHandler(pluginService)
+	skillHandler := handler.NewSkillHandler(skillService)
+	telemetryHandler := handler.NewTelemetryHandler(telemetryService)
 
-	engine := router.NewRouter(cfg, probeHandler, scaffoldHandler, oauthHandler, deviceHandler, jwtAuth)
+	engine := router.NewRouter(cfg, probeHandler, scaffoldHandler, oauthHandler, deviceHandler, pluginHandler, skillHandler, telemetryHandler, jwtAuth)
 
 	return &App{Engine: engine, Redis: rdb, DB: gdb}, nil
 }
