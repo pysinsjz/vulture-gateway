@@ -26,38 +26,43 @@ var DefaultPublicPaths = []string{
 	"/api/v1/auth/logout",
 }
 
-// unauthorizedFunc 写入 401 错误体（按端点族区分形态）。
-type unauthorizedFunc func(c *gin.Context, message string)
+// rejectFunc 写入鉴权失败错误体（按端点族区分形态）。
+type rejectFunc func(c *gin.Context, message string)
 
-// managementUnauthorized 管理 API 族（/api/v1/*）：ApiError{error, message}。
+// managementUnauthorized 管理 API 族（/api/v1/*）：401 ApiError{error, message}。
 func managementUnauthorized(c *gin.Context, message string) {
 	apierror.Abort(c, http.StatusUnauthorized, apierror.CodeUnauthorized, message)
 }
 
-// llmUnauthorized LLM 代理族（/v1/*）：OpenAI 兼容 {error:{message,type,code}}。
+// llmUnauthorized LLM 代理族（/v1/*）：401 OpenAI 兼容 {error:{message,type,code}}。
 func llmUnauthorized(c *gin.Context, message string) {
 	apierror.AbortOpenAI(c, http.StatusUnauthorized, apierror.OpenAITypeInvalidRequest, apierror.CodeUnauthorized, message)
 }
 
+// llmDeviceRevoked LLM 代理族：Device 被吊销 → 403 OpenAI 错误体 device_revoked（api-conventions §3）。
+func llmDeviceRevoked(c *gin.Context, message string) {
+	apierror.AbortOpenAI(c, http.StatusForbidden, apierror.OpenAITypeInvalidRequest, apierror.CodeDeviceRevoked, message)
+}
+
 // JWTAuth 是管理 API 族（/api/v1/*）的鉴权中间件：失败返回 ApiError。
+// 当前管理族吊销仍归 401（沿用 #9–#15 验收口径）；LLM 族按 §3 将吊销分流为 403（见 JWTAuthLLM）。
 func JWTAuth(verifier *auth.Signer, tvs *auth.TokenVersionStore, publicPaths []string) gin.HandlerFunc {
-	return jwtAuth(verifier, tvs, publicPaths, managementUnauthorized)
+	return jwtAuth(verifier, tvs, publicPaths, managementUnauthorized, managementUnauthorized)
 }
 
 // JWTAuthLLM 是 LLM 代理族（/v1/*）的鉴权中间件：失败返回 OpenAI 错误体。
-// 供 LLM 域（#23+）的 /v1/* 端点使用，使三族错误体在鉴权层即各呈其形（#15）。
+// 鉴权失败（缺失/失效/过期）→ 401；Device 被吊销（token_version 不符）→ 403 device_revoked（#23）。
 func JWTAuthLLM(verifier *auth.Signer, tvs *auth.TokenVersionStore, publicPaths []string) gin.HandlerFunc {
-	return jwtAuth(verifier, tvs, publicPaths, llmUnauthorized)
+	return jwtAuth(verifier, tvs, publicPaths, llmUnauthorized, llmDeviceRevoked)
 }
 
-// jwtAuth 校验 access JWT 并执行即时吊销比对（ADR-0010）。错误体形态由 onUnauthorized 决定。
+// jwtAuth 校验 access JWT 并执行即时吊销比对（ADR-0010）。错误体形态由两个回调决定：
+//   - onUnauthorized：缺失/非法/过期 token，或无法校验状态（401 语义）
+//   - onRevoked：token 合法但 token_version 不匹配，即 Device 已被吊销（403 语义，族可自定）
 //
 // 流程：公开例外放行 → 取 Bearer token → 验签/校验有效期 → 与 Redis 中该 Device 当前
-// token_version 做一次 O(1) 比对。任意失败返回 401（族特定错误体）。
-//
-// 注：按 api-conventions.md，「Device 被吊销」语义上对应 403 device_revoked；当前按 issue
-// 验收口径将 token_version 不匹配也归为 401，口径统一待后续。
-func jwtAuth(verifier *auth.Signer, tvs *auth.TokenVersionStore, publicPaths []string, onUnauthorized unauthorizedFunc) gin.HandlerFunc {
+// token_version 做一次 O(1) 比对。
+func jwtAuth(verifier *auth.Signer, tvs *auth.TokenVersionStore, publicPaths []string, onUnauthorized, onRevoked rejectFunc) gin.HandlerFunc {
 	public := make(map[string]struct{}, len(publicPaths))
 	for _, p := range publicPaths {
 		public[p] = struct{}{}
@@ -87,7 +92,7 @@ func jwtAuth(verifier *auth.Signer, tvs *auth.TokenVersionStore, publicPaths []s
 			return
 		}
 		if !exists || current != claims.TokenVersion {
-			onUnauthorized(c, "access token 已被吊销")
+			onRevoked(c, "access token 已被吊销")
 			return
 		}
 

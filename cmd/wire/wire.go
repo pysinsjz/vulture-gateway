@@ -15,6 +15,7 @@ import (
 	"github.com/pysinsjz/vulture-gateway/internal/dao"
 	"github.com/pysinsjz/vulture-gateway/internal/db"
 	"github.com/pysinsjz/vulture-gateway/internal/handler"
+	"github.com/pysinsjz/vulture-gateway/internal/litellm"
 	"github.com/pysinsjz/vulture-gateway/internal/middleware"
 	"github.com/pysinsjz/vulture-gateway/internal/redisx"
 	"github.com/pysinsjz/vulture-gateway/internal/service"
@@ -62,7 +63,11 @@ func WireApp(cfg *config.Configuration) (*App, error) {
 	skillService := service.NewSkillService(clawHubClient)
 	telemetryService := service.NewTelemetryService(clawHubClient)
 
+	llmClient := litellm.NewHTTPClient(cfg.LLM.BaseURL, cfg.LLM.VirtualKey, &http.Client{Timeout: cfg.LLM.Timeout})
+	llmService := service.NewLLMService(llmClient)
+
 	jwtAuth := middleware.JWTAuth(signer, tvs, middleware.DefaultPublicPaths)
+	jwtAuthLLM := middleware.JWTAuthLLM(signer, tvs, nil)
 
 	probeHandler := handler.NewProbeHandler()
 	scaffoldHandler := handler.NewScaffoldHandler(signer, tvs)
@@ -71,8 +76,9 @@ func WireApp(cfg *config.Configuration) (*App, error) {
 	pluginHandler := handler.NewPluginHandler(pluginService)
 	skillHandler := handler.NewSkillHandler(skillService)
 	telemetryHandler := handler.NewTelemetryHandler(telemetryService)
+	llmHandler := handler.NewLLMHandler(llmService)
 
-	engine := router.NewRouter(cfg, probeHandler, scaffoldHandler, oauthHandler, deviceHandler, pluginHandler, skillHandler, telemetryHandler, jwtAuth)
+	engine := router.NewRouter(cfg, probeHandler, scaffoldHandler, oauthHandler, deviceHandler, pluginHandler, skillHandler, telemetryHandler, llmHandler, jwtAuth, jwtAuthLLM)
 
 	return &App{Engine: engine, Redis: rdb, DB: gdb}, nil
 }

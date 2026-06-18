@@ -18,7 +18,16 @@ type Configuration struct {
 	JWT      JWTConfig      `mapstructure:"jwt"`
 	OAuth    OAuthConfig    `mapstructure:"oauth"`
 	ClawHub  ClawHubConfig  `mapstructure:"clawhub"`
+	LLM      LLMConfig      `mapstructure:"llm"`
 	Scaffold ScaffoldConfig `mapstructure:"scaffold"`
+}
+
+// LLMConfig LLM 代理（litellm proxy，ADR-0005）转发配置。
+// 网关持有 litellm virtual key，转发时注入 Authorization，桌面端永远拿不到。
+type LLMConfig struct {
+	BaseURL    string        `mapstructure:"base_url"`    // litellm 基址，如 http://127.0.0.1:4000
+	VirtualKey string        `mapstructure:"virtual_key"` // litellm virtual key（VG_LLM_VIRTUAL_KEY 注入；空则不带鉴权头）
+	Timeout    time.Duration `mapstructure:"timeout"`     // 转发超时，默认 30s（流式 S2 另议）
 }
 
 // ClawHubConfig 内网 ClawHub（fork 裁剪版注册中心，ADR-0006）转发配置。
@@ -134,6 +143,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("oauth.upstream.scopes", "openid profile")
 	v.SetDefault("clawhub.base_url", "http://127.0.0.1:3210")
 	v.SetDefault("clawhub.timeout", "10s")
+	v.SetDefault("llm.base_url", "http://127.0.0.1:4000")
+	v.SetDefault("llm.timeout", "30s")
 }
 
 func (c *Configuration) validate() error {
@@ -165,6 +176,12 @@ func (c *Configuration) validate() error {
 	}
 	if c.ClawHub.Timeout <= 0 {
 		return fmt.Errorf("clawhub.timeout 必须为正，当前 %s", c.ClawHub.Timeout)
+	}
+	if c.LLM.BaseURL == "" {
+		return fmt.Errorf("llm.base_url 未配置")
+	}
+	if c.LLM.Timeout <= 0 {
+		return fmt.Errorf("llm.timeout 必须为正，当前 %s", c.LLM.Timeout)
 	}
 	return nil
 }

@@ -39,6 +39,12 @@ clawhub:
   base_url: "http://127.0.0.1:3210"
   timeout: "10s"
 
+# LLM 代理（litellm proxy，ADR-0005）：网关鉴权后转发，注入 virtual key。key 建议用 VG_LLM_VIRTUAL_KEY 覆盖。
+llm:
+  base_url: "http://127.0.0.1:4000"
+  virtual_key: ""
+  timeout: "30s"
+
 # 脚手架内部签发端点（/__dev/*），仅 dev/test 开启，用于 #9 端到端验证。
 scaffold:
   enabled: true

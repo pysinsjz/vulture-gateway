@@ -15,8 +15,10 @@ type ApiError struct {
 
 // 常用错误码常量。完整错误矩阵见 docs/flows/api-conventions.md。
 const (
-	// CodeUnauthorized 鉴权失败：缺失/非法/过期/签名错误的 token，或 token_version 不匹配（即时吊销）。
+	// CodeUnauthorized 鉴权失败：缺失/非法/过期/签名错误的 token。
 	CodeUnauthorized = "unauthorized"
+	// CodeDeviceRevoked Device 被吊销（token_version 不匹配，即时吊销）。LLM 族据此返 403（见 api-conventions §3）。
+	CodeDeviceRevoked = "device_revoked"
 )
 
 // New 构造一个 ApiError。

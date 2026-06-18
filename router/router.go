@@ -24,7 +24,9 @@ func NewRouter(
 	plugin *handler.PluginHandler,
 	skill *handler.SkillHandler,
 	telemetry *handler.TelemetryHandler,
+	llm *handler.LLMHandler,
 	jwtAuth gin.HandlerFunc,
+	jwtAuthLLM gin.HandlerFunc,
 ) *gin.Engine {
 	gin.SetMode(ginMode(cfg.Server.Mode))
 
@@ -76,6 +78,13 @@ func NewRouter(
 		v1.GET("/plugins/:name/versions/:version/artifact/download", plugin.DownloadPluginArtifact) // npm-pack 302（#21）
 		// 安装遥测（#22）：best-effort 转发内网 ClawHub 对账。
 		v1.POST("/telemetry/install", telemetry.ReportInstall)
+	}
+
+	// LLM 代理族（/v1/*，OpenAI 兼容，#23 起）：挂 JWTAuthLLM（失败返 OpenAI 错误体，吊销 403）。
+	llmGroup := r.Group("/v1")
+	llmGroup.Use(jwtAuthLLM)
+	{
+		llmGroup.GET("/models", llm.ListModels)
 	}
 
 	if cfg.Scaffold.Enabled {

@@ -42,8 +42,9 @@ func newTestEngine(t *testing.T, opts ...func(*config.Configuration)) *gin.Engin
 			AuthzTTL:       10 * time.Minute,
 			Upstream:       config.UpstreamConfig{Mode: "stub", AuthorizeURL: "http://127.0.0.1:8080/oauth/_stub/authorize", ClientID: "vulture-gateway", Scopes: "openid profile"},
 		},
-		// 默认指向不可达基址；未调 /plugins 的用例不会触达。需正路的用例用 opts 覆盖为桩 URL。
+		// 默认指向不可达基址；未调 /plugins、/v1 的用例不会触达。需正路的用例用 opts 覆盖为桩 URL。
 		ClawHub:  config.ClawHubConfig{BaseURL: "http://127.0.0.1:1", Timeout: 5 * time.Second},
+		LLM:      config.LLMConfig{BaseURL: "http://127.0.0.1:1", VirtualKey: "test-vkey", Timeout: 5 * time.Second},
 		Scaffold: config.ScaffoldConfig{Enabled: true},
 	}
 	for _, o := range opts {
