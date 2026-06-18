@@ -101,6 +101,19 @@ func (h *SkillHandler) ResolveSkill(c *gin.Context) {
 	c.JSON(http.StatusOK, res)
 }
 
+// DownloadSkill 下载 skill：302 跳短时效 R2 URL，字节不经网关。version 为空取 latest。
+// 安全门由 ClawHub 强制（decision=fail → 403），经 writeClawHubError 透传。
+//
+//	GET /api/v1/skills/{slug}/download?version=  (Bearer)
+func (h *SkillHandler) DownloadSkill(c *gin.Context) {
+	target, err := h.svc.DownloadURL(c.Request.Context(), c.Param("slug"), c.Query("version"))
+	if err != nil {
+		writeClawHubError(c, err)
+		return
+	}
+	writeDownloadRedirect(c, target)
+}
+
 // isHex64 校验字符串为 64 位十六进制（指纹格式）。
 func isHex64(s string) bool {
 	if len(s) != 64 {

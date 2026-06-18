@@ -64,10 +64,13 @@ func NewRouter(
 		v1.GET("/skills/:slug/versions", skill.ListSkillVersions)
 		v1.GET("/skills/:slug/versions/:version", skill.GetSkillVersion)
 		v1.GET("/skills/:slug/resolve", skill.ResolveSkill)
+		v1.GET("/skills/:slug/download", skill.DownloadSkill) // 302 跳 R2（#21）
 		// plugin 族：鉴权后转发内网 ClawHub packages/packageReleases（#19 list 曳光弹 + #20 铺满）。
 		v1.GET("/plugins", plugin.ListPlugins)
 		v1.GET("/plugins/:name", plugin.GetPlugin)
 		v1.GET("/plugins/:name/versions/:version", plugin.GetPluginVersion)
+		v1.GET("/plugins/:name/download", plugin.DownloadPlugin)                                    // legacy-zip 302（#21）
+		v1.GET("/plugins/:name/versions/:version/artifact/download", plugin.DownloadPluginArtifact) // npm-pack 302（#21）
 	}
 
 	if cfg.Scaffold.Enabled {

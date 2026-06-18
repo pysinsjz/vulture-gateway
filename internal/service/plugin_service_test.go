@@ -11,11 +11,13 @@ import (
 
 // fakeClawHub 是 clawhub.PackagesClient 的内存 fake，便于在不触网下单测翻译/过滤逻辑。
 type fakeClawHub struct {
-	gotParams clawhub.ListParams
-	page      *clawhub.PackagePage
-	detail    *clawhub.PackageDetail
-	release   *clawhub.PackageReleaseDetail
-	err       error
+	gotParams  clawhub.ListParams
+	page       *clawhub.PackagePage
+	detail     *clawhub.PackageDetail
+	release    *clawhub.PackageReleaseDetail
+	download   *clawhub.DownloadTarget
+	gotVersion string
+	err        error
 }
 
 func (f *fakeClawHub) ListPackages(_ context.Context, params clawhub.ListParams) (*clawhub.PackagePage, error) {
@@ -29,6 +31,16 @@ func (f *fakeClawHub) GetPackage(_ context.Context, _ string) (*clawhub.PackageD
 
 func (f *fakeClawHub) GetPackageRelease(_ context.Context, _, _ string) (*clawhub.PackageReleaseDetail, error) {
 	return f.release, f.err
+}
+
+func (f *fakeClawHub) PackageDownloadURL(_ context.Context, _, version string) (*clawhub.DownloadTarget, error) {
+	f.gotVersion = version
+	return f.download, f.err
+}
+
+func (f *fakeClawHub) PackageArtifactURL(_ context.Context, _, version string) (*clawhub.DownloadTarget, error) {
+	f.gotVersion = version
+	return f.download, f.err
 }
 
 func boolPtr(b bool) *bool { return &b }
@@ -206,5 +218,35 @@ func TestGetPluginVersion_Translates(t *testing.T) {
 	}
 	if d.Version.SHA256Hash != "fullhash" {
 		t.Errorf("sha256hash 透传错误: %q", d.Version.SHA256Hash)
+	}
+}
+
+// 下载 URL：取回 ClawHub 签发地址，version 透传。
+func TestPluginDownloadURL(t *testing.T) {
+	fake := &fakeClawHub{download: &clawhub.DownloadTarget{URL: "https://r2.example.com/x.zip?sig=abc"}}
+	svc := service.NewPluginService(fake)
+
+	url, err := svc.DownloadURL(context.Background(), "@v/x", "1.2.0")
+	if err != nil {
+		t.Fatalf("DownloadURL 失败: %v", err)
+	}
+	if url != "https://r2.example.com/x.zip?sig=abc" || fake.gotVersion != "1.2.0" {
+		t.Errorf("下载 URL/version 错误: url=%q version=%q", url, fake.gotVersion)
+	}
+
+	artURL, err := svc.ArtifactURL(context.Background(), "@v/x", "1.2.0")
+	if err != nil || artURL == "" {
+		t.Errorf("ArtifactURL 失败: url=%q err=%v", artURL, err)
+	}
+}
+
+// 安全门阻断：ClawHub 返 403 → 原样上抛由 handler 透传。
+func TestPluginDownloadURL_Blocked(t *testing.T) {
+	hubErr := &clawhub.Error{Status: 403, Code: "blocked"}
+	fake := &fakeClawHub{err: hubErr}
+	svc := service.NewPluginService(fake)
+
+	if _, err := svc.DownloadURL(context.Background(), "@v/x", ""); !errors.Is(err, hubErr) {
+		t.Errorf("应上抛 403 阻断错误, 实际 %v", err)
 	}
 }

@@ -26,6 +26,11 @@ type PackagesClient interface {
 	GetPackage(ctx context.Context, name string) (*PackageDetail, error)
 	// GetPackageRelease 调用 ClawHub GET /packages/{name}/releases/{version}，返回指定版本详情。
 	GetPackageRelease(ctx context.Context, name, version string) (*PackageReleaseDetail, error)
+	// PackageDownloadURL 调用 ClawHub GET /packages/{name}/download-url（legacy-zip），
+	// ClawHub 内部强制安全门 + 签发短时效 URL；被阻断/未就绪返 403/423/409（#21）。
+	PackageDownloadURL(ctx context.Context, name, version string) (*DownloadTarget, error)
+	// PackageArtifactURL 调用 ClawHub GET /packages/{name}/releases/{version}/artifact-url（npm-pack .tgz）。
+	PackageArtifactURL(ctx context.Context, name, version string) (*DownloadTarget, error)
 }
 
 // SkillsClient 抽象内网 ClawHub 的 skill（skills/skillVersions）只读契约。
@@ -40,6 +45,9 @@ type SkillsClient interface {
 	GetSkillVersion(ctx context.Context, slug, version string) (*SkillVersionDetail, error)
 	// ResolveSkill 调用 ClawHub GET /skills/{slug}/resolve?hash=，把本地指纹映射到已发布版本。
 	ResolveSkill(ctx context.Context, slug, hash string) (*ResolveResult, error)
+	// SkillDownloadURL 调用 ClawHub GET /skills/{slug}/download-url，ClawHub 内部强制安全门
+	// （decision=fail → 403）+ 签发短时效 URL；version 为空取 latest（#21）。
+	SkillDownloadURL(ctx context.Context, slug, version string) (*DownloadTarget, error)
 }
 
 // Client 是两族契约的并集，由真实 httpClient 实现，供 wire 装配后分发给各 service。
@@ -58,6 +66,12 @@ type PageParams struct {
 type Category struct {
 	ID    string `json:"id"`
 	Label string `json:"label"`
+}
+
+// DownloadTarget 是 ClawHub 签发的制品下载目标（短时效 R2 presigned URL）。
+// 安全门由 ClawHub 在签发前强制：被阻断/未就绪不返此体，而是 403/423/409（#21）。
+type DownloadTarget struct {
+	URL string `json:"url"`
 }
 
 // Error 表示 ClawHub 返回的非 2xx 响应。Status 用于网关侧错误重映射（ADR-0011）。

@@ -93,6 +93,46 @@ func TestResolveSkill_SendsHashQuery(t *testing.T) {
 	}
 }
 
+// 下载 URL：解析 ClawHub 签发地址，version 作 query 下发。
+func TestPackageDownloadURL_ParsesTarget(t *testing.T) {
+	stub := newMuxStub(t, map[string]func() (int, string){
+		"/packages/@v/x/download-url": func() (int, string) {
+			return http.StatusOK, `{"url":"https://r2.example.com/x.zip?sig=abc"}`
+		},
+	})
+	c := clawhub.NewHTTPClient(stub.srv.URL, stub.srv.Client())
+
+	target, err := c.PackageDownloadURL(context.Background(), "@v/x", "1.2.0")
+	if err != nil {
+		t.Fatalf("PackageDownloadURL 失败: %v", err)
+	}
+	if target.URL != "https://r2.example.com/x.zip?sig=abc" {
+		t.Errorf("url 解析错误: %q", target.URL)
+	}
+	if stub.lastRaw != "version=1.2.0" {
+		t.Errorf("version query 未下发: %q", stub.lastRaw)
+	}
+}
+
+// 安全门：ClawHub 下载端点 403（blocked）以 *clawhub.Error 携带状态码上抛。
+func TestSkillDownloadURL_BlockedPassesThrough(t *testing.T) {
+	stub := newMuxStub(t, map[string]func() (int, string){
+		"/skills/evil/download-url": func() (int, string) {
+			return http.StatusForbidden, `{"error":"blocked","message":"scan:malicious"}`
+		},
+	})
+	c := clawhub.NewHTTPClient(stub.srv.URL, stub.srv.Client())
+
+	_, err := c.SkillDownloadURL(context.Background(), "evil", "")
+	hubErr, ok := err.(*clawhub.Error)
+	if !ok {
+		t.Fatalf("期望 *clawhub.Error, 实际 %T", err)
+	}
+	if hubErr.Status != http.StatusForbidden || hubErr.Code != "blocked" {
+		t.Errorf("阻断错误映射错误: status=%d code=%q", hubErr.Status, hubErr.Code)
+	}
+}
+
 // 业务状态码透传：410（软删除）/ 423（pending）以 *clawhub.Error 携带状态码上抛。
 func TestGetSkillVersion_PassesThroughBusinessStatus(t *testing.T) {
 	for _, status := range []int{http.StatusGone, http.StatusLocked, http.StatusConflict} {

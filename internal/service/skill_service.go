@@ -212,6 +212,16 @@ func (s *SkillService) ResolveSkill(ctx context.Context, slug, hash string) (*Re
 	}, nil
 }
 
+// DownloadURL 取 skill 的短时效下载 URL。version 为空取 latest；安全门由 ClawHub 强制
+// （decision=fail → 403），被阻断/未就绪以 *clawhub.Error 上抛由 handler 透传（#21）。
+func (s *SkillService) DownloadURL(ctx context.Context, slug, version string) (string, error) {
+	t, err := s.hub.SkillDownloadURL(ctx, slug, version)
+	if err != nil {
+		return "", err
+	}
+	return t.URL, nil
+}
+
 func translateSkillListItem(sk clawhub.SkillListItem) SkillListItem {
 	return SkillListItem{
 		Slug:          sk.Slug,

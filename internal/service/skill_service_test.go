@@ -15,6 +15,7 @@ type fakeSkills struct {
 	versions *clawhub.SkillVersionPage
 	version  *clawhub.SkillVersionDetail
 	resolve  *clawhub.ResolveResult
+	download *clawhub.DownloadTarget
 	gotHash  string
 	err      error
 }
@@ -34,6 +35,9 @@ func (f *fakeSkills) GetSkillVersion(_ context.Context, _, _ string) (*clawhub.S
 func (f *fakeSkills) ResolveSkill(_ context.Context, _, hash string) (*clawhub.ResolveResult, error) {
 	f.gotHash = hash
 	return f.resolve, f.err
+}
+func (f *fakeSkills) SkillDownloadURL(_ context.Context, _, _ string) (*clawhub.DownloadTarget, error) {
+	return f.download, f.err
 }
 
 // 列表翻译 + X-Platform 平台过滤（metadata.systems）。
@@ -143,5 +147,19 @@ func TestResolveSkill_Translates(t *testing.T) {
 	}
 	if r.LatestVersion == nil || r.LatestVersion.Version != "1.3.0" {
 		t.Errorf("latestVersion 翻译错误: %+v", r.LatestVersion)
+	}
+}
+
+// 下载 URL：取回 ClawHub 签发地址。
+func TestSkillDownloadURL(t *testing.T) {
+	fake := &fakeSkills{download: &clawhub.DownloadTarget{URL: "https://r2.example.com/s.zip?sig=x"}}
+	svc := service.NewSkillService(fake)
+
+	url, err := svc.DownloadURL(context.Background(), "gifgrep", "")
+	if err != nil {
+		t.Fatalf("DownloadURL 失败: %v", err)
+	}
+	if url != "https://r2.example.com/s.zip?sig=x" {
+		t.Errorf("下载 URL 错误: %q", url)
 	}
 }

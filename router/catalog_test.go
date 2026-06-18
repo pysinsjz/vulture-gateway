@@ -234,6 +234,104 @@ func TestCatalog_PassesThroughBusinessStatus(t *testing.T) {
 	}
 }
 
+// 下载正路：skill / plugin(legacy-zip) / plugin(npm-pack) 均 302 跳短时效 R2 URL，字节不经网关。
+func TestDownload_RedirectsToSignedURL(t *testing.T) {
+	const skillURL = "https://r2.example.com/gifgrep.zip?sig=s1"
+	const pluginURL = "https://r2.example.com/x.zip?sig=p1"
+	const artifactURL = "https://r2.example.com/x.tgz?sig=a1"
+	stub := newCatalogStub(t, map[string]func() (int, string){
+		"/skills/gifgrep/download-url":               ok(`{"url":"` + skillURL + `"}`),
+		"/packages/@v/x/download-url":                ok(`{"url":"` + pluginURL + `"}`),
+		"/packages/@v/x/releases/1.2.0/artifact-url": ok(`{"url":"` + artifactURL + `"}`),
+	})
+	e := newTestEngine(t, withClawHub(stub.srv.URL))
+	token := issueViaScaffold(t, e, "u", "d")
+
+	cases := []struct {
+		name, path, wantURL string
+	}{
+		{"skill", "/api/v1/skills/gifgrep/download?version=1.2.0", skillURL},
+		{"plugin-legacy", "/api/v1/plugins/@v%2Fx/download?version=1.2.0", pluginURL},
+		{"plugin-npm", "/api/v1/plugins/@v%2Fx/versions/1.2.0/artifact/download", artifactURL},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := do(t, e, http.MethodGet, tc.path, token, nil)
+			if rec.Code != http.StatusFound {
+				t.Fatalf("期望 302, 实际 %d: %s", rec.Code, rec.Body.String())
+			}
+			if loc := rec.Header().Get("Location"); loc != tc.wantURL {
+				t.Errorf("Location = %q, 期望 %q", loc, tc.wantURL)
+			}
+			// 字节不经网关：响应体不含制品内容（仅 302 跳转）。
+			if len(rec.Body.Bytes()) > 256 {
+				t.Errorf("响应体疑似夹带制品字节, 长度 %d", len(rec.Body.Bytes()))
+			}
+		})
+	}
+}
+
+// 安全门阻断：ClawHub 403(blocked) → 网关透传 403 ApiError，拿不到 Location。
+func TestDownload_SecurityGateBlocks(t *testing.T) {
+	stub := newCatalogStub(t, map[string]func() (int, string){
+		"/skills/evil/download-url": func() (int, string) {
+			return http.StatusForbidden, `{"error":"blocked","message":"scan:malicious"}`
+		},
+	})
+	e := newTestEngine(t, withClawHub(stub.srv.URL))
+	token := issueViaScaffold(t, e, "u", "d")
+
+	rec := do(t, e, http.MethodGet, "/api/v1/skills/evil/download", token, nil)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("期望 403, 实际 %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("Location") != "" {
+		t.Error("被阻断制品不应拿到 Location")
+	}
+	var body struct{ Error string }
+	_ = json.Unmarshal(rec.Body.Bytes(), &body)
+	if body.Error != "blocked" {
+		t.Errorf("error code = %q, 期望 blocked", body.Error)
+	}
+}
+
+// pending：ClawHub 423 → 网关透传 423（与 malicious 的 403 区分）。
+func TestDownload_PendingDistinctFromMalicious(t *testing.T) {
+	stub := newCatalogStub(t, map[string]func() (int, string){
+		"/packages/@v/x/download-url": func() (int, string) {
+			return http.StatusLocked, `{"error":"pending","message":"扫描中"}`
+		},
+	})
+	e := newTestEngine(t, withClawHub(stub.srv.URL))
+	token := issueViaScaffold(t, e, "u", "d")
+
+	rec := do(t, e, http.MethodGet, "/api/v1/plugins/@v%2Fx/download", token, nil)
+	if rec.Code != http.StatusLocked {
+		t.Fatalf("pending 期望透传 423, 实际 %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("Location") != "" {
+		t.Error("pending 不应拿到 Location")
+	}
+}
+
+// ClawHub 返回畸形下载地址 → 网关收敛为 502，不把无效地址作 Location 暴露。
+func TestDownload_InvalidURLFromClawHub(t *testing.T) {
+	stub := newCatalogStub(t, map[string]func() (int, string){
+		"/skills/gifgrep/download-url": ok(`{"url":"not-a-valid-url"}`),
+	})
+	e := newTestEngine(t, withClawHub(stub.srv.URL))
+	token := issueViaScaffold(t, e, "u", "d")
+
+	rec := do(t, e, http.MethodGet, "/api/v1/skills/gifgrep/download", token, nil)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("无效地址期望 502, 实际 %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("Location") != "" {
+		t.Error("无效地址不应作 Location 暴露")
+	}
+	assertApiError(t, rec)
+}
+
 // 鉴权负路：skill 端点缺 Bearer → 401，不触达 ClawHub。
 func TestSkills_UnauthorizedDoesNotReachClawHub(t *testing.T) {
 	stub := newCatalogStub(t, map[string]func() (int, string){"/skills": ok(`{"items":[],"nextCursor":null}`)})
