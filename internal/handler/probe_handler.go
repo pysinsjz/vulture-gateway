@@ -34,10 +34,3 @@ func (h *ProbeHandler) Whoami(c *gin.Context) {
 func (h *ProbeHandler) BootstrapStub(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"stub": true, "endpoint": "bootstrap"})
 }
-
-// AppLatestStub 是 /api/v1/app/latest 的占位。真实实现属 distribution 域（见 distribution.md）。
-//
-//	GET /api/v1/app/latest  (公开)
-func (h *ProbeHandler) AppLatestStub(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"stub": true, "endpoint": "app/latest"})
-}

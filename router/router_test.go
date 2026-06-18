@@ -217,7 +217,8 @@ func TestWhoami_InstantRevocationAfterBump(t *testing.T) {
 	assertApiError(t, rec)
 }
 
-// JWTAuth 对公开例外路径放行、不要求 Bearer。
+// JWTAuth 对公开例外路径放行、不要求 Bearer（核心契约：无 token 也不返 401）。
+// bootstrap 占位返 200；app/latest 缺参返 400（参数校验，非鉴权）——均证明放行。
 func TestPublicExceptions_NoBearer(t *testing.T) {
 	e := newTestEngine(t)
 	for _, path := range []string{"/api/v1/bootstrap", "/api/v1/app/latest"} {
@@ -225,9 +226,6 @@ func TestPublicExceptions_NoBearer(t *testing.T) {
 			rec := do(t, e, http.MethodGet, path, "", nil)
 			if rec.Code == http.StatusUnauthorized {
 				t.Fatalf("公开例外 %s 不应 401, 实际 %d", path, rec.Code)
-			}
-			if rec.Code != http.StatusOK {
-				t.Fatalf("公开例外 %s 期望 200, 实际 %d", path, rec.Code)
 			}
 		})
 	}

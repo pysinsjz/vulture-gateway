@@ -88,7 +88,30 @@ func WireApp(cfg *config.Configuration) (*App, error) {
 	telemetryHandler := handler.NewTelemetryHandler(telemetryService)
 	llmHandler := handler.NewLLMHandler(llmService, subChecker, meteringService, cfg.LLM.StreamIdleTimeout, cfg.LLM.StreamRequestTimeout, cfg.LLM.MaxRequestBytes)
 
-	engine := router.NewRouter(cfg, probeHandler, scaffoldHandler, oauthHandler, deviceHandler, pluginHandler, skillHandler, telemetryHandler, llmHandler, jwtAuth, jwtAuthLLM)
+	// 宿主 App 自更新（#27）：发布清单由 config 注入占位，待 ops/CD 发布管线接入。
+	distributionService := service.NewDistributionService(toReleases(cfg.Distribution.Releases))
+	distributionHandler := handler.NewDistributionHandler(distributionService)
+
+	engine := router.NewRouter(cfg, probeHandler, scaffoldHandler, oauthHandler, deviceHandler, pluginHandler, skillHandler, telemetryHandler, llmHandler, distributionHandler, jwtAuth, jwtAuthLLM)
 
 	return &App{Engine: engine, Redis: rdb, DB: gdb}, nil
+}
+
+// toReleases 把 config 发布清单映射为 service 层视图（避免 service 依赖 config）。
+func toReleases(entries []config.ReleaseEntry) []service.Release {
+	out := make([]service.Release, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, service.Release{
+			Channel:      e.Channel,
+			Platform:     e.Platform,
+			Version:      e.Version,
+			Mandatory:    e.Mandatory,
+			MinVersion:   e.MinVersion,
+			DownloadURL:  e.DownloadURL,
+			Checksum:     e.Checksum,
+			Size:         e.Size,
+			ReleaseNotes: e.ReleaseNotes,
+		})
+	}
+	return out
 }

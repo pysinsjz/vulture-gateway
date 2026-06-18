@@ -53,6 +53,28 @@ llm:
   credits_per_prompt_token: 1.0
   credits_per_completion_token: 1.0
 
+# 宿主 App 自更新发布清单（#27，F1）。占位数据，待 ops/CD 发布管线接入真实 R2 制品。
+distribution:
+  releases:
+    - channel: stable
+      platform: darwin-arm64
+      version: "1.3.0"
+      mandatory: false
+      min_version: "1.0.0"
+      download_url: "https://r2.example.com/VultureSetup-1.3.0-arm64.dmg"
+      checksum: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+      size: 48000000
+      release_notes: "占位发布说明"
+    - channel: stable
+      platform: win32-x64
+      version: "1.3.0"
+      mandatory: false
+      min_version: "1.0.0"
+      download_url: "https://r2.example.com/VultureSetup-1.3.0-x64.exe"
+      checksum: "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+      size: 52000000
+      release_notes: "占位发布说明"
+
 # 脚手架内部签发端点（/__dev/*），仅 dev/test 开启，用于 #9 端到端验证。
 scaffold:
   enabled: true

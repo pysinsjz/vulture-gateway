@@ -11,15 +11,36 @@ import (
 // Configuration 是网关的全量配置。分环境 YAML（dev/test/staging/prod）落在 config/ 目录，
 // 通过 APP_ENV 选择；敏感项可由环境变量覆盖（前缀 VG_，点号转下划线，如 VG_JWT_SECRET）。
 type Configuration struct {
-	Env      string         `mapstructure:"env"`
-	Server   ServerConfig   `mapstructure:"server"`
-	Redis    RedisConfig    `mapstructure:"redis"`
-	Postgres PostgresConfig `mapstructure:"postgres"`
-	JWT      JWTConfig      `mapstructure:"jwt"`
-	OAuth    OAuthConfig    `mapstructure:"oauth"`
-	ClawHub  ClawHubConfig  `mapstructure:"clawhub"`
-	LLM      LLMConfig      `mapstructure:"llm"`
-	Scaffold ScaffoldConfig `mapstructure:"scaffold"`
+	Env          string             `mapstructure:"env"`
+	Server       ServerConfig       `mapstructure:"server"`
+	Redis        RedisConfig        `mapstructure:"redis"`
+	Postgres     PostgresConfig     `mapstructure:"postgres"`
+	JWT          JWTConfig          `mapstructure:"jwt"`
+	OAuth        OAuthConfig        `mapstructure:"oauth"`
+	ClawHub      ClawHubConfig      `mapstructure:"clawhub"`
+	LLM          LLMConfig          `mapstructure:"llm"`
+	Distribution DistributionConfig `mapstructure:"distribution"`
+	Scaffold     ScaffoldConfig     `mapstructure:"scaffold"`
+}
+
+// DistributionConfig 宿主 App 自更新发布清单（#27，F1）。
+// 发布元数据为占位注入（ops/CD 维护），App 二进制存 R2、下载直连不经网关。
+// TODO(ops): 真实发布管线（CI 上传 R2 + 注册）接入后由其填充。
+type DistributionConfig struct {
+	Releases []ReleaseEntry `mapstructure:"releases"`
+}
+
+// ReleaseEntry 是一条 (channel, platform) 的发布记录。
+type ReleaseEntry struct {
+	Channel      string `mapstructure:"channel"`       // stable / beta
+	Platform     string `mapstructure:"platform"`      // darwin-arm64 / darwin-x64 / win32-x64
+	Version      string `mapstructure:"version"`       // 该发布的逻辑版本（semver）
+	Mandatory    bool   `mapstructure:"mandatory"`     // 强更提示标记（仅提示，网关不硬门禁）
+	MinVersion   string `mapstructure:"min_version"`   // 低于此版本视为强更提示
+	DownloadURL  string `mapstructure:"download_url"`  // R2 直连下载地址
+	Checksum     string `mapstructure:"checksum"`      // "sha256:..." 完整性校验
+	Size         int64  `mapstructure:"size"`          // 安装包字节数
+	ReleaseNotes string `mapstructure:"release_notes"` // 更新说明
 }
 
 // LLMConfig LLM 代理（litellm proxy，ADR-0005）转发配置。
