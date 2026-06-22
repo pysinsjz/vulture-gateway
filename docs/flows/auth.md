@@ -1,6 +1,6 @@
 # 认证域流程（A1–A3）
 
-桌面端 ↔ 网关 的认证交互。相关决策见 ADR-0002（Casdoor 作 IdP）、ADR-0003（浏览器中转 PKCE + Device）、ADR-0009（网关作 OAuth 授权服务器）、ADR-0010（即时吊销）。
+桌面端 ↔ 网关 的认证交互。相关决策见 ADR-0002（Casdoor 作 IdP）、ADR-0003（浏览器中转 PKCE + Device）、ADR-0009（网关作 OAuth 授权服务器）、ADR-0010（即时吊销）、ADR-0012（OIDC 上游接入 + nonce 防护）。
 
 **接口约定**
 - OAuth 端点（`/oauth/*`）遵循 OAuth 2.0 惯例：JSON 请求体，失败返回 `{ "error": "...", "error_description": "..." }`。
@@ -24,13 +24,14 @@ sequenceDiagram
     Note over D: 生成 PKCE verifier/challenge + state<br/>启动本地回环监听 127.0.0.1:PORT
     D->>B: 打开 G/oauth/authorize?code_challenge&state<br/>&redirect_uri=127.0.0.1:PORT
     B->>G: GET /oauth/authorize
-    G->>B: 302 → Casdoor/authorize（网关作为 Casdoor 的 OIDC client）
+    Note over G: 暂存 {state, challenge, redirect_uri, nonce}
+    G->>B: 302 → Casdoor/authorize（网关作为 Casdoor 的 OIDC client，带 nonce）
     B->>C: 登录页：邮箱/手机/微信扫码…多渠道
     C->>B: 认证成功 302 → G/oauth/callback/casdoor?code=CASDOOR_CODE
     B->>G: GET /oauth/callback/casdoor
     G->>C: 后端直连 POST /token 换 Casdoor tokens
-    C->>G: id_token/userinfo（OIDC subject + claims）
-    Note over G: 按 subject 解析/创建 User<br/>生成网关 auth code（绑 PKCE challenge）
+    C->>G: id_token（OIDC subject + claims）
+    Note over G: JWKS 验签 id_token + 校验 nonce<br/>按 subject 解析/创建 User<br/>生成网关 auth code（绑 PKCE challenge）
     G->>B: 302 → 127.0.0.1:PORT/callback?code=GW_CODE&state
     B->>D: 回环收到 GW_CODE
     D->>G: POST /oauth/token：GW_CODE + code_verifier + device
@@ -55,10 +56,10 @@ sequenceDiagram
 | `state` | ✓ | 防 CSRF，原样回传给桌面端 |
 | `scope` | – | 如 `openid profile` |
 
-网关将 `{state, code_challenge, redirect_uri}` 暂存服务端，随后 `302` 跳转到 Casdoor 的 authorize 地址（携带网关自己的回调与关联 state）。
+网关生成 `nonce` 并将 `{state, code_challenge, redirect_uri, nonce}` 暂存服务端，随后 `302` 跳转到 Casdoor 的 authorize 地址（携带网关自己的回调、关联 state 与 nonce）。`nonce` 为网关内部生成、非桌面端入参（ADR-0012）。
 
 **`GET /oauth/callback/casdoor`** —— Casdoor 的回调目标（服务端内部）。
-查询参数：`code`（Casdoor 授权码）、`state`（关联 state）。网关后端直连用该 code 换 Casdoor token，读取 OIDC subject，解析/创建 User，签发一次性的网关授权码（GW_CODE，TTL 60s、单次使用），并 `302` 跳回桌面端回环地址 `redirect_uri?code=GW_CODE&state=<原始 state>`。
+查询参数：`code`（Casdoor 授权码）、`state`（关联 state）。网关后端直连用该 code 换 Casdoor token，对 `id_token` 做 JWKS 验签并校验其 `nonce` 与暂存值一致（防注入/重放），读取 OIDC subject，解析/创建 User，签发一次性的网关授权码（GW_CODE，TTL 60s、单次使用），并 `302` 跳回桌面端回环地址 `redirect_uri?code=GW_CODE&state=<原始 state>`。`nonce` 不匹配按上游交互失败处理（state 有效→回跳 `server_error`）。
 
 **失败回跳契约：**
 - **`state` 有效（redirect_uri 已知）下的失败**——用户在 Casdoor 取消、网关↔Casdoor 换 token 失败、subject 解析失败等 ⇒ `302` 跳回 `redirect_uri?error=<code>&error_description=<...>&state=<原始 state>`（RFC 6749 错误响应；`access_denied`=用户取消，`server_error`=网关↔Casdoor 交互失败）。桌面端回环收到 `error` ⇒ 判登录失败 → 提示并关闭本地 server。
