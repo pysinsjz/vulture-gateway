@@ -2,19 +2,18 @@ package handler_test
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"testing"
+
+	"github.com/pysinsjz/vulture-gateway/internal/auth"
 )
 
-const (
-	pkceVerifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
-	tokenState   = "orig-token-state"
-)
+const pkceVerifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
 
 func challengeFor(verifier string) string {
 	sum := sha256.Sum256([]byte(verifier))
@@ -31,31 +30,17 @@ func (f *oauthFixture) postJSON(t *testing.T, path string, body any) *httptest.R
 	return rec
 }
 
-// obtainGWCode 走 authorize → callback 拿到一枚真实 GW_CODE（绑定给定 challenge / redirect_uri）。
+// obtainGWCode 直接向 GWCodeStore 播种一枚 GW_CODE（绑定给定 challenge / redirect_uri），
+// 等价于自建登录页提交成功后的签发结果——A1 下半 /oauth/token 用例与登录方式解耦。
 func (f *oauthFixture) obtainGWCode(t *testing.T, challenge, redirectURI string) string {
 	t.Helper()
-	q := url.Values{}
-	q.Set("response_type", "code")
-	q.Set("client_id", "vulture-desktop")
-	q.Set("code_challenge", challenge)
-	q.Set("code_challenge_method", "S256")
-	q.Set("state", tokenState)
-	q.Set("redirect_uri", redirectURI)
-	authRec := f.get(t, "/oauth/authorize?"+q.Encode())
-	if authRec.Code != http.StatusFound {
-		t.Fatalf("authorize 期望 302, 实际 %d", authRec.Code)
-	}
-	upLoc, _ := url.Parse(authRec.Header().Get("Location"))
-	linkedState := upLoc.Query().Get("state")
-
-	cbRec := f.get(t, "/oauth/callback/casdoor?code=UP&state="+url.QueryEscape(linkedState))
-	if cbRec.Code != http.StatusFound {
-		t.Fatalf("callback 期望 302, 实际 %d", cbRec.Code)
-	}
-	backLoc, _ := url.Parse(cbRec.Header().Get("Location"))
-	gw := backLoc.Query().Get("code")
-	if gw == "" {
-		t.Fatal("未拿到 GW_CODE")
+	gw, err := f.gwcodes.Issue(context.Background(), auth.GWCode{
+		CodeChallenge: challenge,
+		UserUUID:      "usr_test",
+		RedirectURI:   redirectURI,
+	})
+	if err != nil {
+		t.Fatalf("播种 GW_CODE 失败: %v", err)
 	}
 	return gw
 }

@@ -25,13 +25,6 @@ oauth:
   gateway_base_url: ""
   gw_code_ttl: "60s"
   authz_ttl: "10m"
-  upstream:
-    mode: "oidc"
-    authorize_url: ""
-    token_url: ""
-    client_id: "vulture-gateway"
-    client_secret: ""
-    scopes: "openid profile"
 
 scaffold:
   enabled: false

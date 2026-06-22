@@ -22,30 +22,6 @@ import (
 	"github.com/pysinsjz/vulture-gateway/internal/service"
 )
 
-// fakeUpstream 受控上游：AuthorizeURL 把 linkedState/nonce 放进 query 便于测试提取；Exchange 派生 subject。
-type fakeUpstream struct {
-	exchangeErr   error
-	subject       string
-	authNonce     string // 最近一次 AuthorizeURL 收到的 nonce
-	exchangeNonce string // 最近一次 Exchange 收到的 nonce
-}
-
-func (f *fakeUpstream) AuthorizeURL(linkedState, nonce string) string {
-	f.authNonce = nonce
-	return "https://idp.example/authorize?state=" + url.QueryEscape(linkedState) + "&nonce=" + url.QueryEscape(nonce)
-}
-
-func (f *fakeUpstream) Exchange(_ context.Context, code, nonce string) (string, error) {
-	f.exchangeNonce = nonce
-	if f.exchangeErr != nil {
-		return "", f.exchangeErr
-	}
-	if f.subject != "" {
-		return f.subject, nil
-	}
-	return "subject-" + code, nil
-}
-
 // fakeUserRepo 内存 User 仓，记录 resolve/create 的 subject。
 type fakeUserRepo struct {
 	bySubject map[string]*model.User
@@ -209,7 +185,6 @@ type oauthFixture struct {
 	engine    *gin.Engine
 	mr        *miniredis.Miniredis
 	rdb       *redis.Client
-	upstream  *fakeUpstream
 	users     *fakeUserRepo
 	gwcodes   *auth.GWCodeStore
 	devices   *fakeDeviceRepo
@@ -232,7 +207,6 @@ func newOAuthFixture(t *testing.T) *oauthFixture {
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = rdb.Close() })
 
-	up := &fakeUpstream{}
 	users := newFakeUserRepo()
 	devices := newFakeDeviceRepo()
 	refreshes := newFakeRefreshRepo()
@@ -246,12 +220,11 @@ func newOAuthFixture(t *testing.T) *oauthFixture {
 	svc := service.NewOAuthService(fakeTransactor{}, devices, refreshes, gwStore, tvs, replayStore, locker, signer, 1440*time.Hour, fixtureGraceWindow)
 	deviceSvc := service.NewDeviceService(tvs, devices, refreshes)
 
-	h := handler.NewOAuthHandler(up, authzStore, gwStore, users, svc, "vulture-desktop")
+	h := handler.NewOAuthHandler(authzStore, gwStore, users, svc, "vulture-desktop")
 	dh := handler.NewDeviceHandler(signer, deviceSvc)
 
 	r := gin.New()
 	r.GET("/oauth/authorize", h.Authorize)
-	r.GET("/oauth/callback/casdoor", h.Callback)
 	r.POST("/oauth/token", h.Token)
 	// 管理 API 组：whoami（探针）+ A3 logout/devices。logout 走公开例外（自带鉴权）。
 	probe := handler.NewProbeHandler()
@@ -266,7 +239,7 @@ func newOAuthFixture(t *testing.T) *oauthFixture {
 	llm.Use(middleware.JWTAuthLLM(signer, tvs, nil))
 	llm.GET("/ping", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
 
-	return &oauthFixture{engine: r, mr: mr, rdb: rdb, upstream: up, users: users, gwcodes: gwStore, devices: devices, refreshes: refreshes}
+	return &oauthFixture{engine: r, mr: mr, rdb: rdb, users: users, gwcodes: gwStore, devices: devices, refreshes: refreshes}
 }
 
 func (f *oauthFixture) get(t *testing.T, path string) *httptest.ResponseRecorder {
@@ -290,8 +263,9 @@ func validAuthorizeURL() string {
 	return "/oauth/authorize?" + q.Encode()
 }
 
-// /oauth/authorize 合法参数 → 302 跳上游，并暂存 state/challenge/redirect_uri（经回调成功间接验证）。
-func TestAuthorize_ValidRedirectsToUpstream(t *testing.T) {
+// /oauth/authorize 合法参数 → 302 跳网关登录页 /oauth/login，并携带 linkedState（lk），
+// 同时暂存 state/challenge/redirect_uri（经登录提交链路间接验证，阶段五）。
+func TestAuthorize_RedirectsToLoginPage(t *testing.T) {
 	f := newOAuthFixture(t)
 	rec := f.get(t, validAuthorizeURL())
 
@@ -299,11 +273,11 @@ func TestAuthorize_ValidRedirectsToUpstream(t *testing.T) {
 		t.Fatalf("期望 302, 实际 %d: %s", rec.Code, rec.Body.String())
 	}
 	loc, _ := url.Parse(rec.Header().Get("Location"))
-	if loc.Host != "idp.example" {
-		t.Errorf("应跳上游 idp.example, 实际 %s", loc.Host)
+	if loc.Path != "/oauth/login" {
+		t.Errorf("应跳网关登录页 /oauth/login, 实际 %s", loc.Path)
 	}
-	if loc.Query().Get("state") == "" {
-		t.Error("跳上游应携带关联 state")
+	if loc.Query().Get("lk") == "" {
+		t.Error("跳登录页应携带 linkedState（lk）")
 	}
 }
 
@@ -370,77 +344,5 @@ func TestAuthorize_AnyLoopbackPortAllowed(t *testing.T) {
 	}
 }
 
-// 全链路：authorize → callback → 回跳带 GW_CODE + 原 state；GW_CODE 绑定 challenge + 创建 User。
-func TestAuthorizeCallback_FullFlow(t *testing.T) {
-	f := newOAuthFixture(t)
-
-	authRec := f.get(t, validAuthorizeURL())
-	if authRec.Code != http.StatusFound {
-		t.Fatalf("authorize 期望 302, 实际 %d", authRec.Code)
-	}
-	upstreamLoc, _ := url.Parse(authRec.Header().Get("Location"))
-	linkedState := upstreamLoc.Query().Get("state")
-
-	cbRec := f.get(t, "/oauth/callback/casdoor?code=UPSTREAM_CODE&state="+url.QueryEscape(linkedState))
-	if cbRec.Code != http.StatusFound {
-		t.Fatalf("callback 期望 302, 实际 %d: %s", cbRec.Code, cbRec.Body.String())
-	}
-
-	backLoc, _ := url.Parse(cbRec.Header().Get("Location"))
-	if backLoc.Scheme+"://"+backLoc.Host+backLoc.Path != validRedirect {
-		t.Errorf("应回跳 %s, 实际 %s", validRedirect, backLoc.String())
-	}
-	if got := backLoc.Query().Get("state"); got != "orig-xyz" {
-		t.Errorf("回跳 state 应为原值 orig-xyz, 实际 %q", got)
-	}
-	gwCode := backLoc.Query().Get("code")
-	if gwCode == "" {
-		t.Fatal("回跳缺 GW_CODE")
-	}
-
-	// GW_CODE 绑定 PKCE challenge + User。
-	data, found, err := f.gwcodes.Consume(context.Background(), gwCode)
-	if err != nil || !found {
-		t.Fatalf("应能取用 GW_CODE, found=%v err=%v", found, err)
-	}
-	if data.CodeChallenge != "challenge-abc" {
-		t.Errorf("GW_CODE 应绑定 challenge-abc, 实际 %q", data.CodeChallenge)
-	}
-	if data.UserUUID != "usr_subject-UPSTREAM_CODE" {
-		t.Errorf("GW_CODE 应绑定 User, 实际 %q", data.UserUUID)
-	}
-	if _, ok := f.users.bySubject["subject-UPSTREAM_CODE"]; !ok {
-		t.Error("应已解析/创建 User")
-	}
-}
-
-// callback 用未知/已过期 state → 400（无 redirect_uri 可回跳）。
-func TestCallback_UnknownState(t *testing.T) {
-	f := newOAuthFixture(t)
-	rec := f.get(t, "/oauth/callback/casdoor?code=c&state=st_unknown")
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("未知 state 期望 400, 实际 %d", rec.Code)
-	}
-}
-
-// callback 上游换码失败 → 回跳 redirect_uri 带 error=server_error + 原 state。
-func TestCallback_UpstreamExchangeFailureRedirects(t *testing.T) {
-	f := newOAuthFixture(t)
-	f.upstream.exchangeErr = context.DeadlineExceeded
-
-	authRec := f.get(t, validAuthorizeURL())
-	upstreamLoc, _ := url.Parse(authRec.Header().Get("Location"))
-	linkedState := upstreamLoc.Query().Get("state")
-
-	rec := f.get(t, "/oauth/callback/casdoor?code=c&state="+url.QueryEscape(linkedState))
-	if rec.Code != http.StatusFound {
-		t.Fatalf("换码失败应回跳 302, 实际 %d", rec.Code)
-	}
-	loc, _ := url.Parse(rec.Header().Get("Location"))
-	if loc.Query().Get("error") != "server_error" {
-		t.Errorf("应回跳 error=server_error, 实际 %q", loc.Query().Get("error"))
-	}
-	if loc.Query().Get("state") != "orig-xyz" {
-		t.Errorf("回跳应带原 state, 实际 %q", loc.Query().Get("state"))
-	}
-}
+// 注：authorize→callback→token 全链路、callback 失败回跳分支等用例随 Casdoor 上游删除而下线，
+// 自建登录页（GET/POST /oauth/login）的全链路用例由阶段五 LoginHandler 测试承接（ADR-0013）。

@@ -19,10 +19,10 @@ var (
 	errBadRedirect     = errors.New("redirect_uri 必须是 http://127.0.0.1:<port>/callback 或 http://[::1]:<port>/callback")
 )
 
-// OAuthHandler 实现网关作为 OAuth 授权服务器的浏览器侧端点（A1 上半，#11）：
-// /oauth/authorize 发起、/oauth/callback/casdoor 上游回调到签发 GW_CODE 为止。
+// OAuthHandler 实现网关作为 OAuth 授权服务器的浏览器侧端点（A1 上半）：
+// /oauth/authorize 发起、暂存授权请求后 302 跳网关自渲染登录页（ADR-0013：内聚自建身份认证）。
+// 登录页提交与 GW_CODE 签发由 LoginHandler 承接（Phase 1 阶段五）。
 type OAuthHandler struct {
-	upstream auth.UpstreamIDP
 	authz    *auth.AuthzStore
 	gwcodes  *auth.GWCodeStore
 	users    dao.UserRepository
@@ -31,11 +31,11 @@ type OAuthHandler struct {
 }
 
 // NewOAuthHandler 构造 handler。
-func NewOAuthHandler(upstream auth.UpstreamIDP, authz *auth.AuthzStore, gwcodes *auth.GWCodeStore, users dao.UserRepository, tokenSvc *service.OAuthService, clientID string) *OAuthHandler {
-	return &OAuthHandler{upstream: upstream, authz: authz, gwcodes: gwcodes, users: users, tokenSvc: tokenSvc, clientID: clientID}
+func NewOAuthHandler(authz *auth.AuthzStore, gwcodes *auth.GWCodeStore, users dao.UserRepository, tokenSvc *service.OAuthService, clientID string) *OAuthHandler {
+	return &OAuthHandler{authz: authz, gwcodes: gwcodes, users: users, tokenSvc: tokenSvc, clientID: clientID}
 }
 
-// Authorize 浏览器入口：校验参数 → 暂存 state/challenge/redirect_uri → 302 跳上游。
+// Authorize 浏览器入口：校验参数 → 暂存 state/challenge/redirect_uri → 302 跳网关登录页。
 //
 //	GET /oauth/authorize  (公开)
 func (h *OAuthHandler) Authorize(c *gin.Context) {
@@ -69,96 +69,17 @@ func (h *OAuthHandler) Authorize(c *gin.Context) {
 	}
 
 	linkedState := idgen.New("st")
-	nonce := idgen.New("nonce")
 	if err := h.authz.Save(c.Request.Context(), linkedState, auth.AuthzRequest{
 		OrigState:     state,
 		CodeChallenge: codeChallenge,
 		RedirectURI:   redirectURI,
-		Nonce:         nonce,
 	}); err != nil {
 		apierror.AbortOAuth(c, http.StatusInternalServerError, apierror.OAuthServerError, "暂存授权请求失败")
 		return
 	}
 
-	c.Redirect(http.StatusFound, h.upstream.AuthorizeURL(linkedState, nonce))
-}
-
-// Callback 上游回调：换 subject → 解析/创建 User → 签发 GW_CODE → 302 回跳桌面端。
-// 失败回跳三分支（#15）：state 有效→回跳带 error/state；state 失效→渲染错误页不回跳。
-//
-//	GET /oauth/callback/casdoor  (上游回调)
-func (h *OAuthHandler) Callback(c *gin.Context) {
-	linkedState := c.Query("state")
-	if linkedState == "" {
-		// 无 state，无法定位 redirect_uri → 渲染错误页，不向未知地址回送。
-		renderErrorPage(c, "登录状态缺失，请重新发起登录。")
-		return
-	}
-
-	req, found, err := h.authz.Take(c.Request.Context(), linkedState)
-	if err != nil {
-		renderErrorPage(c, "登录处理出错，请稍后重试。")
-		return
-	}
-	if !found {
-		// state 失效/非法：网关已无 redirect_uri，不回跳。
-		renderErrorPage(c, "登录状态无效或已过期，请重新发起登录。")
-		return
-	}
-
-	// 自此已知 redirect_uri，失败按 RFC 6749 回跳 redirect_uri?error=&error_description=&state=。
-	// 上游显式错误（如用户取消）→ access_denied；其余上游/网关交互失败 → server_error。
-	if upErr := c.Query("error"); upErr != "" {
-		h.redirectError(c, req.RedirectURI, normalizeUpstreamError(upErr), c.Query("error_description"), req.OrigState)
-		return
-	}
-
-	code := c.Query("code")
-	if code == "" {
-		h.redirectError(c, req.RedirectURI, apierror.OAuthServerError, "上游未返回授权码", req.OrigState)
-		return
-	}
-
-	subject, err := h.upstream.Exchange(c.Request.Context(), code, req.Nonce)
-	if err != nil {
-		h.redirectError(c, req.RedirectURI, apierror.OAuthServerError, "上游换取 token 失败", req.OrigState)
-		return
-	}
-
-	user, err := h.users.ResolveOrCreateBySubject(c.Request.Context(), subject)
-	if err != nil {
-		h.redirectError(c, req.RedirectURI, apierror.OAuthServerError, "解析 User 失败", req.OrigState)
-		return
-	}
-
-	gwCode, err := h.gwcodes.Issue(c.Request.Context(), auth.GWCode{
-		CodeChallenge: req.CodeChallenge,
-		UserUUID:      user.UUID,
-		RedirectURI:   req.RedirectURI,
-	})
-	if err != nil {
-		h.redirectError(c, req.RedirectURI, apierror.OAuthServerError, "签发授权码失败", req.OrigState)
-		return
-	}
-
-	redirectBack(c, req.RedirectURI, url.Values{"code": {gwCode}, "state": {req.OrigState}})
-}
-
-// redirectError 以 302 回跳 redirect_uri，携带 RFC 6749 错误参数与原 state。
-func (h *OAuthHandler) redirectError(c *gin.Context, redirectURI, code, description, origState string) {
-	redirectBack(c, redirectURI, url.Values{
-		"error":             {code},
-		"error_description": {description},
-		"state":             {origState},
-	})
-}
-
-// normalizeUpstreamError 归一上游错误码：用户取消（access_denied）原样透传，其余归 server_error。
-func normalizeUpstreamError(upstreamErr string) string {
-	if upstreamErr == apierror.OAuthAccessDenied {
-		return apierror.OAuthAccessDenied
-	}
-	return apierror.OAuthServerError
+	// 302 跳网关自渲染登录页，凭 linkedState 续接已暂存的授权请求（登录提交在 LoginHandler）。
+	c.Redirect(http.StatusFound, "/oauth/login?lk="+url.QueryEscape(linkedState))
 }
 
 // renderErrorPage 渲染极简浏览器错误页（不回跳，避免向未知地址回送数据）。

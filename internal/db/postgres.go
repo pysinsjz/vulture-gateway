@@ -38,7 +38,7 @@ func Ping(ctx context.Context, gdb *gorm.DB) error {
 
 // AutoMigrate 迁移当前已知的表结构。
 func AutoMigrate(gdb *gorm.DB) error {
-	if err := gdb.AutoMigrate(&model.User{}, &model.Device{}, &model.RefreshToken{}); err != nil {
+	if err := gdb.AutoMigrate(&model.User{}, &model.Identity{}, &model.Provider{}, &model.Device{}, &model.RefreshToken{}); err != nil {
 		return fmt.Errorf("AutoMigrate 失败: %w", err)
 	}
 	return nil

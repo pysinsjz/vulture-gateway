@@ -44,11 +44,11 @@ func NewRouter(
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 
-	// OAuth 端点（公开，不经 JWTAuth）。A1 上半：authorize + 上游回调（#11）。
+	// OAuth 端点（公开，不经 JWTAuth）。A1 上半：authorize 暂存后跳网关登录页；token 换码（ADR-0013）。
+	// 登录页 GET/POST /oauth/login 由 LoginHandler 承接（Phase 1 阶段五接入）。
 	oauthGroup := r.Group("/oauth")
 	{
 		oauthGroup.GET("/authorize", oauth.Authorize)
-		oauthGroup.GET("/callback/casdoor", oauth.Callback)
 		oauthGroup.POST("/token", oauth.Token)
 	}
 

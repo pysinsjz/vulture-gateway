@@ -23,10 +23,6 @@ oauth:
   gateway_base_url: "http://127.0.0.1:8080"
   gw_code_ttl: "60s"
   authz_ttl: "10m"
-  upstream:
-    mode: "stub"
-    authorize_url: "http://127.0.0.1:8080/oauth/_stub/authorize"
-    scopes: "openid profile"
 
 scaffold:
   enabled: true

@@ -29,7 +29,7 @@ type App struct {
 	DB     *gorm.DB
 }
 
-// WireApp 按层级顺序手工装配：DB/Redis → 签发器/吊销存储/上游/授权暂存 → DAO → handler → router。
+// WireApp 按层级顺序手工装配：DB/Redis → 签发器/吊销存储/授权暂存 → DAO → handler → router。
 func WireApp(cfg *config.Configuration) (*App, error) {
 	rdb := redisx.NewClient(cfg.Redis)
 
@@ -41,10 +41,6 @@ func WireApp(cfg *config.Configuration) (*App, error) {
 	signer := auth.NewSigner(cfg.JWT)
 	tvs := auth.NewTokenVersionStore(rdb)
 
-	upstream, err := auth.NewUpstream(cfg.OAuth)
-	if err != nil {
-		return nil, fmt.Errorf("装配上游 IdP 失败: %w", err)
-	}
 	authzStore := auth.NewAuthzStore(rdb, cfg.OAuth.AuthzTTL)
 	gwCodeStore := auth.NewGWCodeStore(rdb, cfg.OAuth.GWCodeTTL)
 	replayStore := auth.NewRefreshReplayStore(rdb, cfg.OAuth.RefreshGraceWindow)
@@ -81,7 +77,7 @@ func WireApp(cfg *config.Configuration) (*App, error) {
 
 	probeHandler := handler.NewProbeHandler()
 	scaffoldHandler := handler.NewScaffoldHandler(signer, tvs)
-	oauthHandler := handler.NewOAuthHandler(upstream, authzStore, gwCodeStore, userDAO, oauthService, cfg.OAuth.ClientID)
+	oauthHandler := handler.NewOAuthHandler(authzStore, gwCodeStore, userDAO, oauthService, cfg.OAuth.ClientID)
 	deviceHandler := handler.NewDeviceHandler(signer, deviceService)
 	pluginHandler := handler.NewPluginHandler(pluginService)
 	skillHandler := handler.NewSkillHandler(skillService)
