@@ -16,8 +16,10 @@ import (
 // UserRepository 是 User 的数据访问契约。接口化以便上层逻辑可对内存假实现测试，
 // 真实实现走 GORM/PostgreSQL（ADR-0001）。
 type UserRepository interface {
-	// ResolveOrCreateBySubject 按上游 OIDC subject 解析 User，不存在则创建。幂等。
+	// ResolveOrCreateBySubject 按身份锚 subject 解析 User，不存在则创建。幂等。
 	ResolveOrCreateBySubject(ctx context.Context, subject string) (*model.User, error)
+	// Create 持久化一条 User。用于「验证码登录即注册」在事务内与 Identity 同步建号。
+	Create(ctx context.Context, user *model.User) error
 }
 
 type userDAO struct {
@@ -27,6 +29,13 @@ type userDAO struct {
 // NewUserDAO 构造 GORM 实现。
 func NewUserDAO(db *gorm.DB) UserRepository {
 	return &userDAO{db: db}
+}
+
+func (d *userDAO) Create(ctx context.Context, user *model.User) error {
+	if err := dbFrom(ctx, d.db).Create(user).Error; err != nil {
+		return fmt.Errorf("创建 User 失败: %w", err)
+	}
+	return nil
 }
 
 func (d *userDAO) ResolveOrCreateBySubject(ctx context.Context, subject string) (*model.User, error) {

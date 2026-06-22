@@ -30,6 +30,13 @@ type fakeUserRepo struct {
 
 func newFakeUserRepo() *fakeUserRepo { return &fakeUserRepo{bySubject: map[string]*model.User{}} }
 
+func (r *fakeUserRepo) Create(_ context.Context, u *model.User) error {
+	r.seq++
+	u.ID = r.seq
+	r.bySubject[u.Subject] = u
+	return nil
+}
+
 func (r *fakeUserRepo) ResolveOrCreateBySubject(_ context.Context, subject string) (*model.User, error) {
 	if u, ok := r.bySubject[subject]; ok {
 		return u, nil
