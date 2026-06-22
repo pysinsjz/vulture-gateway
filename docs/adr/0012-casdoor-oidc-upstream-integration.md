@@ -1,5 +1,7 @@
 # Casdoor OIDC 上游接入：go-oidc + issuer discovery + nonce
 
+> **⚠️ Superseded by [ADR-0013](0013-self-built-identity-authentication.md)（2026-06-22）。** Casdoor 上游与全部 oidc 代码已删，改为网关内置自建认证。本文保留作历史记录。
+
 ADR-0002/0009 已定「身份委托 Casdoor、网关作授权服务器、Casdoor 在上游」，网关侧 OAuth 全流程已对着 stub 上游（`internal/auth/upstream.go`）实现并测试。本 ADR 定**真实 Casdoor OIDC client（`oidc` 模式）的接入实现决策**。
 
 - **用 `coreos/go-oidc` + `golang.org/x/oauth2`，而非手写 token 交换。** `Exchange` 经 OIDC discovery（`/.well-known/openid-configuration`）拿端点、用 Casdoor 的 JWKS 本地验签 `id_token`，从已验证 token 取 `sub` 作 `User.Subject`（稳定 GUID，邮箱/渠道变更不影响身份）。验签 / JWKS 轮换 / discovery 不手搓。配置上游从显式 `authorize_url/token_url` 收敛为单个 **`issuer`**，其余端点自动得到。

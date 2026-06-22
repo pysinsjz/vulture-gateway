@@ -21,11 +21,11 @@ The single unit of identity. Credits, marketplace entitlements, and LLM usage al
 _Avoid_: account, member, customer
 
 **Identity Provider**:
-The self-hosted Casdoor instance that owns every login channel (email password, email/phone code, WeChat QR, social) and authenticates Users on the Gateway's behalf over OIDC. The Gateway never implements channels itself.
-_Avoid_: auth server, SSO, IAM, Casdoor (use the role name)
+The Gateway's own built-in authentication subsystem (ADR-0013). It owns the login channels (email/phone password, email/phone code, future social), renders the login page, and authenticates Users itself — no third-party IdP. Login channels are modeled as a single `SigninMethod` registry; future social logins plug in as `Redirect`-kind methods. (Superseded the earlier delegated-Casdoor design, ADR-0002/0012.)
+_Avoid_: auth server, SSO, IAM, Casdoor
 
 **Identity**:
-One login channel a User authenticates through (email, phone, WeChat, …). Channels are owned and aggregated by the Identity Provider; the Gateway maps the IdP's authenticated subject to its own User. A User may have many Identities, all resolving to the same User.
+One login channel a User authenticates through, persisted as a row in the `Identity` table (`type`=email/phone/oauth, `identifier`, `secret`=password hash or empty, `provider`). A User may have many Identities, all resolving to the same User; authentication resolves Identity → User and returns the stable `User` subject downstream.
 _Avoid_: login, credential, provider account
 
 **Device**:
