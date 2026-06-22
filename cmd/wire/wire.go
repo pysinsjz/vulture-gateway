@@ -2,7 +2,12 @@
 package wire
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
+	"log"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -11,12 +16,15 @@ import (
 
 	"github.com/pysinsjz/vulture-gateway/config"
 	"github.com/pysinsjz/vulture-gateway/internal/auth"
+	"github.com/pysinsjz/vulture-gateway/internal/auth/signin"
 	"github.com/pysinsjz/vulture-gateway/internal/clawhub"
 	"github.com/pysinsjz/vulture-gateway/internal/dao"
 	"github.com/pysinsjz/vulture-gateway/internal/db"
 	"github.com/pysinsjz/vulture-gateway/internal/handler"
 	"github.com/pysinsjz/vulture-gateway/internal/litellm"
 	"github.com/pysinsjz/vulture-gateway/internal/middleware"
+	"github.com/pysinsjz/vulture-gateway/internal/model"
+	"github.com/pysinsjz/vulture-gateway/internal/notify"
 	"github.com/pysinsjz/vulture-gateway/internal/redisx"
 	"github.com/pysinsjz/vulture-gateway/internal/service"
 	"github.com/pysinsjz/vulture-gateway/router"
@@ -50,6 +58,35 @@ func WireApp(cfg *config.Configuration) (*App, error) {
 	userDAO := dao.NewUserDAO(gdb)
 	deviceDAO := dao.NewDeviceDAO(gdb)
 	refreshDAO := dao.NewRefreshTokenDAO(gdb)
+	identityDAO := dao.NewIdentityDAO(gdb)
+
+	// 自建身份认证（ADR-0013）：RSA 解密（dev 缺省自生成临时密钥）+ 验证码/限流/CSRF 存储。
+	rsaDecryptor, err := buildRSADecryptor(cfg.Auth.RSAPrivateKeyPEM)
+	if err != nil {
+		return nil, fmt.Errorf("装配 RSA 解密器失败: %w", err)
+	}
+	hasher := auth.NewBcryptHasher(cfg.Auth.BcryptCost)
+	otpStore := auth.NewOTPStore(rdb, cfg.Auth.OTPTTL, cfg.Auth.OTPResendInterval, cfg.Auth.OTPMaxAttempts)
+	csrfStore := auth.NewCSRFStore(rdb, cfg.Auth.CSRFTTL)
+	rateLimiter := auth.NewRateLimiter(rdb, auth.RateLimitConfig{
+		LoginMaxFailures: cfg.Auth.LoginMaxFailures,
+		LoginLockWindow:  cfg.Auth.LoginLockWindow,
+		SendMax:          cfg.Auth.SendMax,
+		SendWindow:       cfg.Auth.SendWindow,
+	})
+
+	// 验证码渠道：email 优先用 config seed 的 SMTP，否则 stub；sms Phase 1 用 stub（无真实短信适配器）。
+	otpService := service.NewOTPService(otpStore, rateLimiter, map[string]notify.CodeSender{
+		model.ProviderCategoryEmail: buildEmailSender(cfg.Auth.Providers),
+		model.ProviderCategorySMS:   notify.NewStubSender("sms"),
+	})
+
+	// 登录方式 registry：password + email_code + sms_code（Phase 1 全为 Direct）。
+	signinRegistry := signin.NewRegistry(
+		signin.NewPasswordMethod(identityDAO, hasher, rsaDecryptor, rateLimiter),
+		signin.NewEmailCodeMethod(otpStore, identityDAO, userDAO, transactor),
+		signin.NewSmsCodeMethod(otpStore, identityDAO, userDAO, transactor),
+	)
 
 	oauthService := service.NewOAuthService(transactor, deviceDAO, refreshDAO, gwCodeStore, tvs, replayStore, locker, signer, cfg.OAuth.RefreshTTL, cfg.OAuth.RefreshGraceWindow)
 	deviceService := service.NewDeviceService(tvs, deviceDAO, refreshDAO)
@@ -78,6 +115,7 @@ func WireApp(cfg *config.Configuration) (*App, error) {
 	probeHandler := handler.NewProbeHandler()
 	scaffoldHandler := handler.NewScaffoldHandler(signer, tvs)
 	oauthHandler := handler.NewOAuthHandler(authzStore, gwCodeStore, userDAO, oauthService, cfg.OAuth.ClientID)
+	loginHandler := handler.NewLoginHandler(signinRegistry, otpService, authzStore, gwCodeStore, userDAO, rsaDecryptor, csrfStore)
 	deviceHandler := handler.NewDeviceHandler(signer, deviceService)
 	pluginHandler := handler.NewPluginHandler(pluginService)
 	skillHandler := handler.NewSkillHandler(skillService)
@@ -96,9 +134,36 @@ func WireApp(cfg *config.Configuration) (*App, error) {
 	bootstrapService := service.NewBootstrapService(cfg.Bootstrap.GatewayVersion, cfg.Bootstrap.MinAppVersion, cfg.Bootstrap.McpEnabled, maxUploadMB, toNotices(cfg.Bootstrap.Notices), distributionService)
 	bootstrapHandler := handler.NewBootstrapHandler(bootstrapService)
 
-	engine := router.NewRouter(cfg, probeHandler, scaffoldHandler, oauthHandler, deviceHandler, pluginHandler, skillHandler, telemetryHandler, llmHandler, distributionHandler, bootstrapHandler, jwtAuth, jwtAuthLLM)
+	engine := router.NewRouter(cfg, probeHandler, scaffoldHandler, oauthHandler, loginHandler, deviceHandler, pluginHandler, skillHandler, telemetryHandler, llmHandler, distributionHandler, bootstrapHandler, jwtAuth, jwtAuthLLM)
 
 	return &App{Engine: engine, Redis: rdb, DB: gdb}, nil
+}
+
+// buildRSADecryptor 构造密码解密器。私钥为空时（dev/test）自生成临时 RSA 密钥对，重启即换。
+func buildRSADecryptor(privPEM string) (*auth.RSADecryptor, error) {
+	if privPEM == "" {
+		key, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			return nil, fmt.Errorf("生成临时 RSA 密钥失败: %w", err)
+		}
+		der, err := x509.MarshalPKCS8PrivateKey(key)
+		if err != nil {
+			return nil, fmt.Errorf("序列化临时 RSA 私钥失败: %w", err)
+		}
+		privPEM = string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}))
+		log.Println("[auth] 未配置 auth.rsa_private_key_pem，已生成临时 RSA 密钥对（仅 dev/test，重启即换）")
+	}
+	return auth.NewRSADecryptor(privPEM)
+}
+
+// buildEmailSender 选取邮件发送器：config seed 含启用的 SMTP provider 则用之，否则用 stub（dev 联调）。
+func buildEmailSender(seeds []config.ProviderSeed) notify.CodeSender {
+	for _, s := range seeds {
+		if s.Category == model.ProviderCategoryEmail && s.Type == "smtp" && s.Enabled && s.Host != "" {
+			return notify.NewSMTPSender(s.Host, s.Port, s.Username, s.Password, s.From)
+		}
+	}
+	return notify.NewStubSender("email")
 }
 
 // toNotices 把 config 公告映射为 service 层视图。

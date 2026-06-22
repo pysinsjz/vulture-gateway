@@ -17,6 +17,7 @@ type Configuration struct {
 	Postgres     PostgresConfig     `mapstructure:"postgres"`
 	JWT          JWTConfig          `mapstructure:"jwt"`
 	OAuth        OAuthConfig        `mapstructure:"oauth"`
+	Auth         AuthConfig         `mapstructure:"auth"`
 	ClawHub      ClawHubConfig      `mapstructure:"clawhub"`
 	LLM          LLMConfig          `mapstructure:"llm"`
 	Distribution DistributionConfig `mapstructure:"distribution"`
@@ -107,6 +108,39 @@ type OAuthConfig struct {
 	RefreshGraceWindow time.Duration  `mapstructure:"refresh_grace_window"` // refresh 轮换幂等宽限窗，默认 60s
 }
 
+// AuthConfig 自建身份认证配置（ADR-0013）。密钥/凭据敏感项由 VG_ 注入。
+type AuthConfig struct {
+	// RSAPrivateKeyPEM 登录页密码加密的 RSA 私钥（PKCS#8/PKCS#1 PEM）。
+	// dev/test 留空时启动自生成临时密钥对（重启即换）；prod/staging 必须经 VG_AUTH_RSA_PRIVATE_KEY_PEM 注入。
+	RSAPrivateKeyPEM string `mapstructure:"rsa_private_key_pem"`
+	BcryptCost       int    `mapstructure:"bcrypt_cost"` // 密码散列 cost，默认 12
+
+	OTPTTL            time.Duration `mapstructure:"otp_ttl"`             // 验证码有效期，默认 5m
+	OTPResendInterval time.Duration `mapstructure:"otp_resend_interval"` // 验证码重发间隔，默认 60s
+	OTPMaxAttempts    int           `mapstructure:"otp_max_attempts"`    // 单码最大尝试，默认 5
+
+	LoginMaxFailures int           `mapstructure:"login_max_failures"` // 密码失败上限，默认 5
+	LoginLockWindow  time.Duration `mapstructure:"login_lock_window"`  // 锁定时长，默认 15m
+	SendMax          int           `mapstructure:"send_max"`           // 验证码发送配额（dest+IP），默认 5
+	SendWindow       time.Duration `mapstructure:"send_window"`        // 发送配额窗口，默认 1h
+	CSRFTTL          time.Duration `mapstructure:"csrf_ttl"`           // 登录页 CSRF token 寿命，默认 10m
+
+	Providers []ProviderSeed `mapstructure:"providers"` // 渠道 seed（email/sms）；空则用 stub 发码（dev）
+}
+
+// ProviderSeed 是一条验证码渠道 seed（对齐 model.Provider 核心列）。
+type ProviderSeed struct {
+	Name     string `mapstructure:"name"`     // 渠道名（唯一）
+	Category string `mapstructure:"category"` // email | sms
+	Type     string `mapstructure:"type"`     // smtp 等
+	Host     string `mapstructure:"host"`     // SMTP host
+	Port     int    `mapstructure:"port"`     // SMTP port
+	Username string `mapstructure:"username"` // SMTP 用户名（→ ClientID）
+	Password string `mapstructure:"password"` // SMTP 密码（→ ClientSecret，VG_ 注入）
+	From     string `mapstructure:"from"`     // 发件人地址
+	Enabled  bool   `mapstructure:"enabled"`  // 是否启用
+}
+
 // ServerConfig HTTP 服务监听配置。
 type ServerConfig struct {
 	Addr string `mapstructure:"addr"` // 监听地址，如 ":8080"
@@ -182,6 +216,15 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("oauth.authz_ttl", "10m")
 	v.SetDefault("oauth.refresh_ttl", "1440h") // 60 天
 	v.SetDefault("oauth.refresh_grace_window", "60s")
+	v.SetDefault("auth.bcrypt_cost", 12)
+	v.SetDefault("auth.otp_ttl", "5m")
+	v.SetDefault("auth.otp_resend_interval", "60s")
+	v.SetDefault("auth.otp_max_attempts", 5)
+	v.SetDefault("auth.login_max_failures", 5)
+	v.SetDefault("auth.login_lock_window", "15m")
+	v.SetDefault("auth.send_max", 5)
+	v.SetDefault("auth.send_window", "1h")
+	v.SetDefault("auth.csrf_ttl", "10m")
 	v.SetDefault("clawhub.base_url", "http://127.0.0.1:3210")
 	v.SetDefault("clawhub.timeout", "10s")
 	v.SetDefault("llm.base_url", "http://127.0.0.1:4000")
@@ -224,6 +267,10 @@ func (c *Configuration) validate() error {
 	}
 	if c.LLM.Timeout <= 0 {
 		return fmt.Errorf("llm.timeout 必须为正，当前 %s", c.LLM.Timeout)
+	}
+	// 生产/预发必须显式注入 RSA 私钥；dev/test 允许留空（启动自生成临时密钥）。
+	if (c.Env == "prod" || c.Env == "staging") && c.Auth.RSAPrivateKeyPEM == "" {
+		return fmt.Errorf("auth.rsa_private_key_pem 未配置（prod/staging 必填，由 VG_AUTH_RSA_PRIVATE_KEY_PEM 注入）")
 	}
 	return nil
 }

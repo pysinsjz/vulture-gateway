@@ -46,6 +46,22 @@ func (s *AuthzStore) Save(ctx context.Context, linkedState string, req AuthzRequ
 	return nil
 }
 
+// Peek 读取但不删除，供渲染登录页时校验 linkedState 有效（GET 不应消费，否则刷新即失效）。
+// 真正消费在登录提交成功时由 Take 完成。found=false 表示不存在或已过期。
+func (s *AuthzStore) Peek(ctx context.Context, linkedState string) (req AuthzRequest, found bool, err error) {
+	raw, err := s.rdb.Get(ctx, authzKey(linkedState)).Bytes()
+	if errors.Is(err, redis.Nil) {
+		return AuthzRequest{}, false, nil
+	}
+	if err != nil {
+		return AuthzRequest{}, false, fmt.Errorf("读取 authz 请求失败: %w", err)
+	}
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return AuthzRequest{}, false, fmt.Errorf("反序列化 authz 请求失败: %w", err)
+	}
+	return req, true, nil
+}
+
 // Take 取回并删除（一次性）。found=false 表示不存在或已过期/已被取用。
 func (s *AuthzStore) Take(ctx context.Context, linkedState string) (req AuthzRequest, found bool, err error) {
 	raw, err := s.rdb.GetDel(ctx, authzKey(linkedState)).Bytes()

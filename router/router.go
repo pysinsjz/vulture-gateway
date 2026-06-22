@@ -20,6 +20,7 @@ func NewRouter(
 	probe *handler.ProbeHandler,
 	scaffold *handler.ScaffoldHandler,
 	oauth *handler.OAuthHandler,
+	login *handler.LoginHandler,
 	device *handler.DeviceHandler,
 	plugin *handler.PluginHandler,
 	skill *handler.SkillHandler,
@@ -50,6 +51,10 @@ func NewRouter(
 	{
 		oauthGroup.GET("/authorize", oauth.Authorize)
 		oauthGroup.POST("/token", oauth.Token)
+		// 自建登录页（ADR-0013）：渲染、提交、验证码下发。
+		oauthGroup.GET("/login", login.LoginPage)
+		oauthGroup.POST("/login", login.Login)
+		oauthGroup.POST("/send-code", login.SendCode)
 	}
 
 	v1 := r.Group("/api/v1")
