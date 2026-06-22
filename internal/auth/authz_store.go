@@ -16,6 +16,7 @@ type AuthzRequest struct {
 	OrigState     string `json:"orig_state"`     // 桌面端原始 state，回跳时原样带回
 	CodeChallenge string `json:"code_challenge"` // PKCE challenge（S256），透传至 GW_CODE
 	RedirectURI   string `json:"redirect_uri"`   // 桌面端回环回调
+	Nonce         string `json:"nonce"`          // 上游 OIDC nonce，回调时校验 id_token 防注入/重放（ADR-0012）
 }
 
 // AuthzStore 暂存 authorize 请求（Redis），TTL 覆盖一次授权流程的存活期。

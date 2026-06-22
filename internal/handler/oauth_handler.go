@@ -69,16 +69,18 @@ func (h *OAuthHandler) Authorize(c *gin.Context) {
 	}
 
 	linkedState := idgen.New("st")
+	nonce := idgen.New("nonce")
 	if err := h.authz.Save(c.Request.Context(), linkedState, auth.AuthzRequest{
 		OrigState:     state,
 		CodeChallenge: codeChallenge,
 		RedirectURI:   redirectURI,
+		Nonce:         nonce,
 	}); err != nil {
 		apierror.AbortOAuth(c, http.StatusInternalServerError, apierror.OAuthServerError, "暂存授权请求失败")
 		return
 	}
 
-	c.Redirect(http.StatusFound, h.upstream.AuthorizeURL(linkedState))
+	c.Redirect(http.StatusFound, h.upstream.AuthorizeURL(linkedState, nonce))
 }
 
 // Callback 上游回调：换 subject → 解析/创建 User → 签发 GW_CODE → 302 回跳桌面端。
@@ -117,7 +119,7 @@ func (h *OAuthHandler) Callback(c *gin.Context) {
 		return
 	}
 
-	subject, err := h.upstream.Exchange(c.Request.Context(), code)
+	subject, err := h.upstream.Exchange(c.Request.Context(), code, req.Nonce)
 	if err != nil {
 		h.redirectError(c, req.RedirectURI, apierror.OAuthServerError, "上游换取 token 失败", req.OrigState)
 		return

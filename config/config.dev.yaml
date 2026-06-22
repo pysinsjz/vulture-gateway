@@ -26,12 +26,16 @@ oauth:
   refresh_ttl: "1440h" # 60 天
   refresh_grace_window: "60s"
   upstream:
-    # stub：内置桩上游，#11 本地联调用；真实 Casdoor 待 #10 部署后切 oidc。
+    # 默认 stub（离线/CI 不依赖 Casdoor）。对接真实 Casdoor 时用环境变量覆盖：
+    #   VG_OAUTH_UPSTREAM_MODE=oidc
+    #   VG_OAUTH_UPSTREAM_CLIENT_SECRET=<Casdoor app-built-in secret>
+    # 并保持 SSH 隧道 `ssh -L 8000:localhost:8000 root@8.136.147.138` 连通（ADR-0012）。
     mode: "stub"
-    authorize_url: "http://127.0.0.1:8080/oauth/_stub/authorize"
+    issuer: "http://127.0.0.1:8000" # oidc 模式：经隧道的 Casdoor，端点由 discovery 自得
+    authorize_url: "http://127.0.0.1:8080/oauth/_stub/authorize" # 仅 stub 用
     token_url: ""
-    client_id: "vulture-gateway"
-    client_secret: ""
+    client_id: "4d470feb109eb429e22c" # Casdoor app-built-in client_id（非机密）
+    client_secret: "" # 经 VG_OAUTH_UPSTREAM_CLIENT_SECRET 注入
     scopes: "openid profile"
 
 # 内网 ClawHub（fork 裁剪版注册中心，ADR-0006）：网关鉴权后转发 skill/plugin 查询。纯内网、无鉴权。

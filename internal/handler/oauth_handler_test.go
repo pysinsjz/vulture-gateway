@@ -22,17 +22,21 @@ import (
 	"github.com/pysinsjz/vulture-gateway/internal/service"
 )
 
-// fakeUpstream 受控上游：AuthorizeURL 把 linkedState 放进 query 便于测试提取；Exchange 派生 subject。
+// fakeUpstream 受控上游：AuthorizeURL 把 linkedState/nonce 放进 query 便于测试提取；Exchange 派生 subject。
 type fakeUpstream struct {
-	exchangeErr error
-	subject     string
+	exchangeErr   error
+	subject       string
+	authNonce     string // 最近一次 AuthorizeURL 收到的 nonce
+	exchangeNonce string // 最近一次 Exchange 收到的 nonce
 }
 
-func (f *fakeUpstream) AuthorizeURL(linkedState string) string {
-	return "https://idp.example/authorize?state=" + url.QueryEscape(linkedState)
+func (f *fakeUpstream) AuthorizeURL(linkedState, nonce string) string {
+	f.authNonce = nonce
+	return "https://idp.example/authorize?state=" + url.QueryEscape(linkedState) + "&nonce=" + url.QueryEscape(nonce)
 }
 
-func (f *fakeUpstream) Exchange(_ context.Context, code string) (string, error) {
+func (f *fakeUpstream) Exchange(_ context.Context, code, nonce string) (string, error) {
+	f.exchangeNonce = nonce
 	if f.exchangeErr != nil {
 		return "", f.exchangeErr
 	}

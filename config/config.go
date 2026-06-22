@@ -112,8 +112,9 @@ type OAuthConfig struct {
 // Mode=stub 时用内置桩（#11 联调）；Mode=oidc 时走真实 Casdoor（凭据由 #10 填入）。
 type UpstreamConfig struct {
 	Mode         string `mapstructure:"mode"`          // stub | oidc
-	AuthorizeURL string `mapstructure:"authorize_url"` // 上游 authorize 端点
-	TokenURL     string `mapstructure:"token_url"`     // 上游 token 端点
+	Issuer       string `mapstructure:"issuer"`        // oidc 模式：OIDC issuer，端点经 discovery 自得（ADR-0012）
+	AuthorizeURL string `mapstructure:"authorize_url"` // stub 模式：桩 authorize 端点
+	TokenURL     string `mapstructure:"token_url"`     // 仅 stub 保留；oidc 由 discovery 提供
 	ClientID     string `mapstructure:"client_id"`     // 网关在上游注册的 client_id
 	ClientSecret string `mapstructure:"client_secret"` // 由 VG_OAUTH_UPSTREAM_CLIENT_SECRET 注入
 	Scopes       string `mapstructure:"scopes"`        // 空格分隔，如 "openid profile"
@@ -228,7 +229,17 @@ func (c *Configuration) validate() error {
 		return fmt.Errorf("oauth.gw_code_ttl / authz_ttl / refresh_ttl / refresh_grace_window 必须为正")
 	}
 	switch c.OAuth.Upstream.Mode {
-	case "stub", "oidc":
+	case "stub":
+	case "oidc":
+		if c.OAuth.Upstream.Issuer == "" {
+			return fmt.Errorf("oauth.upstream.issuer 未配置（oidc 模式必填）")
+		}
+		if c.OAuth.Upstream.ClientID == "" {
+			return fmt.Errorf("oauth.upstream.client_id 未配置（oidc 模式必填）")
+		}
+		if c.OAuth.Upstream.ClientSecret == "" {
+			return fmt.Errorf("oauth.upstream.client_secret 未配置（由 VG_OAUTH_UPSTREAM_CLIENT_SECRET 注入）")
+		}
 	default:
 		return fmt.Errorf("oauth.upstream.mode 必须为 stub 或 oidc，当前 %q", c.OAuth.Upstream.Mode)
 	}
