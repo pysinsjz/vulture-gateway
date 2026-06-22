@@ -14,3 +14,7 @@ coverage.*
 .env
 .env.*
 !.env.example
+
+# Python 脚本缓存
+__pycache__/
+*.pyc
