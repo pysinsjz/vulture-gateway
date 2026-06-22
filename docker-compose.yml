@@ -1,0 +1,26 @@
+# vulture-gateway 单机部署编排（同机复用已在跑的公共基础设施）。
+#
+# 数据层复用 litellm 栈的共享实例（公共基础设施，非网关私有）：
+#   - postgres：litellm-db，库 vulture_gateway + 独立用户 vulture（litellm compose 暴露 127.0.0.1:5432）
+#   - redis：  litellm-redis，db1（与 litellm 的 db0 隔离；litellm compose 暴露 127.0.0.1:6379）
+#   连接串/库选择经 .env 注入（VG_POSTGRES_DSN / VG_REDIS_DB）。
+#
+# 网络拓扑要点（ADR-0012）：
+#   网关走 host 网络，使容器内 127.0.0.1:8000 直达宿主 Casdoor，
+#   满足 OIDC discovery 对 issuer(http://127.0.0.1:8000) 的严格校验；
+#   同时 127.0.0.1 可达 litellm:4000 与回环暴露的 pg(5432)/redis(6379)。
+#
+# 敏感项（client_secret / jwt secret / pg 密码）由同目录 .env 注入，.env 不入库。
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: vulture-gateway:local
+    container_name: vulture-gateway-app
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - .env
+    environment:
+      APP_ENV: dev

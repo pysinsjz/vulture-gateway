@@ -1,0 +1,22 @@
+# VCS
+.git
+.gitignore
+
+# 构建产物
+/server
+/bin
+*.exe
+*.test
+*.out
+coverage.*
+
+# 本地环境
+.env
+.env.*
+*.local.yaml
+
+# 文档/IDE（不进构建上下文，减小体积、提速）
+docs
+.idea
+.vscode
+.DS_Store
