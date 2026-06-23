@@ -30,7 +30,11 @@ oauth:
 #   - rsa_private_key_pem 留空 → 启动自生成临时 RSA 密钥对（重启即换，仅 dev/test；prod 必须 VG_AUTH_RSA_PRIVATE_KEY_PEM 注入）
 #   - providers 留空 → 验证码用 stub 发码器（打印到日志，不需真实 SMTP/短信凭据）
 #   - 其余参数（bcrypt_cost/otp_*/login_*/send_*/csrf_ttl）由 setDefaults 提供安全基线
-# 启用真实 SMTP 邮件验证码示例（取消注释并经 VG_ 注入 password）：
+auth:
+  # dev 万能验证码：登录页验证码填 111111 即直接通过校验（免去查真实码，便于手动登录）。
+  # 仅 dev/test 生效；prod/staging 配置此项会启动失败（config.validate 硬阻止）。
+  dev_otp_bypass_code: "111111"
+# 启用真实 SMTP 邮件验证码示例（取消注释并经 VG_ 注入 password，与上面 auth 段合并）：
 # auth:
 #   providers:
 #     - name: "smtp-primary"

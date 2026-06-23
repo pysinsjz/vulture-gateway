@@ -126,6 +126,10 @@ type AuthConfig struct {
 	CSRFTTL          time.Duration `mapstructure:"csrf_ttl"`           // 登录页 CSRF token 寿命，默认 10m
 
 	Providers []ProviderSeed `mapstructure:"providers"` // 渠道 seed（email/sms）；空则用 stub 发码（dev）
+
+	// DevOTPBypassCode 是 dev/test 专用「万能验证码」：非空时提交该码即直接通过 OTP 校验，
+	// 免去查真实码（便于手动在登录页验证）。仅 dev/test 可配；prod/staging 配了将启动失败（见 validate）。
+	DevOTPBypassCode string `mapstructure:"dev_otp_bypass_code"`
 }
 
 // ProviderSeed 是一条验证码渠道 seed（对齐 model.Provider 核心列）。
@@ -271,6 +275,10 @@ func (c *Configuration) validate() error {
 	// 生产/预发必须显式注入 RSA 私钥；dev/test 允许留空（启动自生成临时密钥）。
 	if (c.Env == "prod" || c.Env == "staging") && c.Auth.RSAPrivateKeyPEM == "" {
 		return fmt.Errorf("auth.rsa_private_key_pem 未配置（prod/staging 必填，由 VG_AUTH_RSA_PRIVATE_KEY_PEM 注入）")
+	}
+	// 万能验证码是 dev/test 后门，prod/staging 严禁配置（否则任何人填固定码即可登录）。
+	if (c.Env == "prod" || c.Env == "staging") && c.Auth.DevOTPBypassCode != "" {
+		return fmt.Errorf("auth.dev_otp_bypass_code 不得在 %s 配置（仅限 dev/test 的万能验证码后门）", c.Env)
 	}
 	return nil
 }

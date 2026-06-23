@@ -78,7 +78,7 @@ func newLoginFixture(t *testing.T) *loginFixture {
 	authzStore := auth.NewAuthzStore(rdb, 10*time.Minute)
 	gwStore := auth.NewGWCodeStore(rdb, 60*time.Second)
 	csrfStore := auth.NewCSRFStore(rdb, 10*time.Minute)
-	otpStore := auth.NewOTPStore(rdb, 5*time.Minute, 60*time.Second, 5)
+	otpStore := auth.NewOTPStore(rdb, 5*time.Minute, 60*time.Second, 5, "")
 	limiter := auth.NewRateLimiter(rdb, auth.RateLimitConfig{LoginMaxFailures: 5, LoginLockWindow: 15 * time.Minute, SendMax: 3, SendWindow: 10 * time.Minute})
 
 	identities := newFakeIdentityRepo()

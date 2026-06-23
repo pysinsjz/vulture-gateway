@@ -21,11 +21,16 @@ type OTPStore struct {
 	ttl            time.Duration
 	resendInterval time.Duration
 	maxAttempts    int
+	// bypassCode 是 dev/test 专用的「万能验证码」：非空时，提交该码即直接通过校验，
+	// 免去查真实码的麻烦（便于手动在登录页验证）。务必仅在 dev/test 注入；
+	// prod/staging 必须为空（由 config.validate 硬阻止 + wire 装配按 env 过滤双重保险）。
+	bypassCode string
 }
 
 // NewOTPStore 构造验证码存储。ttl=有效期（5min）、resendInterval=重发间隔（60s）、maxAttempts=单码最大尝试（5）。
-func NewOTPStore(rdb *redis.Client, ttl, resendInterval time.Duration, maxAttempts int) *OTPStore {
-	return &OTPStore{rdb: rdb, ttl: ttl, resendInterval: resendInterval, maxAttempts: maxAttempts}
+// bypassCode 为 dev/test 万能码（空=禁用，生产必须空）。
+func NewOTPStore(rdb *redis.Client, ttl, resendInterval time.Duration, maxAttempts int, bypassCode string) *OTPStore {
+	return &OTPStore{rdb: rdb, ttl: ttl, resendInterval: resendInterval, maxAttempts: maxAttempts, bypassCode: bypassCode}
 }
 
 func otpCodeKey(dest string) string     { return "otp:code:" + dest }
@@ -69,6 +74,12 @@ func (s *OTPStore) CanResend(ctx context.Context, dest string) (bool, error) {
 // Verify 校验 dest 的验证码：码不存在/已过期→false；尝试已达上限→false（单码作废）；
 // 命中→删除全部相关键并返回 true；未命中→尝试计数 +1，达上限则作废该码。
 func (s *OTPStore) Verify(ctx context.Context, dest, code string) (bool, error) {
+	// dev/test 万能码：直接放行并清理可能残留的真实码/计数（生产 bypassCode 恒为空，不触发）。
+	if s.bypassCode != "" && code == s.bypassCode {
+		s.rdb.Del(ctx, otpCodeKey(dest), otpAttemptsKey(dest))
+		return true, nil
+	}
+
 	stored, err := s.rdb.Get(ctx, otpCodeKey(dest)).Result()
 	if errors.Is(err, redis.Nil) {
 		return false, nil

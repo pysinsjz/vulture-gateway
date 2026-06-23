@@ -37,7 +37,7 @@ func newOTPServiceFixture(t *testing.T) (*OTPService, *auth.OTPStore, *fakeSende
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = rdb.Close() })
 
-	otp := auth.NewOTPStore(rdb, 5*time.Minute, 60*time.Second, 5)
+	otp := auth.NewOTPStore(rdb, 5*time.Minute, 60*time.Second, 5, "")
 	limiter := auth.NewRateLimiter(rdb, auth.RateLimitConfig{
 		LoginMaxFailures: 5, LoginLockWindow: 15 * time.Minute, SendMax: 3, SendWindow: 10 * time.Minute,
 	})

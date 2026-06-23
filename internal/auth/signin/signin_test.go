@@ -106,7 +106,7 @@ func newDeps(t *testing.T) *deps {
 	return &deps{
 		identities: newFakeIdentityRepo(),
 		users:      &fakeUserRepo{},
-		otp:        auth.NewOTPStore(rdb, 5*time.Minute, 60*time.Second, 5),
+		otp:        auth.NewOTPStore(rdb, 5*time.Minute, 60*time.Second, 5, ""),
 		limiter: auth.NewRateLimiter(rdb, auth.RateLimitConfig{
 			LoginMaxFailures: 5, LoginLockWindow: 15 * time.Minute, SendMax: 3, SendWindow: 10 * time.Minute,
 		}),

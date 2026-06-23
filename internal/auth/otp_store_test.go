@@ -16,7 +16,7 @@ const (
 func newTestOTPStore(t *testing.T) (*OTPStore, *otpHarness) {
 	t.Helper()
 	rdb, mr := testRedis(t)
-	return NewOTPStore(rdb, testOTPTTL, testOTPResend, testOTPMax), &otpHarness{mr: mr}
+	return NewOTPStore(rdb, testOTPTTL, testOTPResend, testOTPMax, ""), &otpHarness{mr: mr}
 }
 
 type otpHarness struct{ mr interface{ FastForward(time.Duration) } }
@@ -44,6 +44,41 @@ func TestOTPStore_VerifyCorrectConsumes(t *testing.T) {
 	// 一次性：消费后再验证同码应失败。
 	if ok, _ := store.Verify(ctx, "dest", code); ok {
 		t.Error("验证码应一次性，消费后不可复用")
+	}
+}
+
+func TestOTPStore_BypassCode(t *testing.T) {
+	rdb, _ := testRedis(t)
+	store := NewOTPStore(rdb, testOTPTTL, testOTPResend, testOTPMax, "111111")
+	ctx := context.Background()
+
+	// 未发码也能用万能码直接通过。
+	if ok, err := store.Verify(ctx, "dest", "111111"); err != nil || !ok {
+		t.Fatalf("万能码应直接通过, ok=%v err=%v", ok, err)
+	}
+
+	// 非万能码仍走常规校验：未发码 → 不通过。
+	if ok, _ := store.Verify(ctx, "dest", "222222"); ok {
+		t.Error("非万能码且无真实码应不通过")
+	}
+
+	// 已发真实码时，万能码仍通过且清理真实码（后续真实码不可再用）。
+	real, _ := store.Issue(ctx, "dest2")
+	if ok, _ := store.Verify(ctx, "dest2", "111111"); !ok {
+		t.Error("有真实码时万能码也应通过")
+	}
+	if ok, _ := store.Verify(ctx, "dest2", real); ok {
+		t.Error("万能码通过后应已清理真实码")
+	}
+}
+
+func TestOTPStore_BypassDisabledWhenEmpty(t *testing.T) {
+	store, _ := newTestOTPStore(t) // bypassCode=""
+	ctx := context.Background()
+
+	// 空 bypass 时，固定码 111111 不应有任何特殊待遇（未发码 → 不通过）。
+	if ok, _ := store.Verify(ctx, "dest", "111111"); ok {
+		t.Error("bypassCode 为空时 111111 不应被放行")
 	}
 }
 

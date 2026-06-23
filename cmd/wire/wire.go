@@ -66,7 +66,12 @@ func WireApp(cfg *config.Configuration) (*App, error) {
 		return nil, fmt.Errorf("装配 RSA 解密器失败: %w", err)
 	}
 	hasher := auth.NewBcryptHasher(cfg.Auth.BcryptCost)
-	otpStore := auth.NewOTPStore(rdb, cfg.Auth.OTPTTL, cfg.Auth.OTPResendInterval, cfg.Auth.OTPMaxAttempts)
+	// 万能验证码后门仅在 dev/test 注入；其余环境强制为空（与 config.validate 双重保险）。
+	otpBypassCode := ""
+	if cfg.Env == "dev" || cfg.Env == "test" {
+		otpBypassCode = cfg.Auth.DevOTPBypassCode
+	}
+	otpStore := auth.NewOTPStore(rdb, cfg.Auth.OTPTTL, cfg.Auth.OTPResendInterval, cfg.Auth.OTPMaxAttempts, otpBypassCode)
 	csrfStore := auth.NewCSRFStore(rdb, cfg.Auth.CSRFTTL)
 	rateLimiter := auth.NewRateLimiter(rdb, auth.RateLimitConfig{
 		LoginMaxFailures: cfg.Auth.LoginMaxFailures,
