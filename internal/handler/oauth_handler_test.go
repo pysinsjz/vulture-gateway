@@ -234,7 +234,7 @@ func newOAuthFixture(t *testing.T) *oauthFixture {
 	r.GET("/oauth/authorize", h.Authorize)
 	r.POST("/oauth/token", h.Token)
 	// 管理 API 组：whoami（探针）+ A3 logout/devices。logout 走公开例外（自带鉴权）。
-	probe := handler.NewProbeHandler()
+	probe := handler.NewProbeHandler(newFakeIdentityRepo())
 	v1 := r.Group("/api/v1")
 	v1.Use(middleware.JWTAuth(signer, tvs, middleware.DefaultPublicPaths))
 	v1.GET("/whoami", probe.Whoami)

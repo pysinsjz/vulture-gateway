@@ -117,7 +117,7 @@ func WireApp(cfg *config.Configuration) (*App, error) {
 	jwtAuth := middleware.JWTAuth(signer, tvs, middleware.DefaultPublicPaths)
 	jwtAuthLLM := middleware.JWTAuthLLM(signer, tvs, nil)
 
-	probeHandler := handler.NewProbeHandler()
+	probeHandler := handler.NewProbeHandler(identityDAO)
 	scaffoldHandler := handler.NewScaffoldHandler(signer, tvs)
 	oauthHandler := handler.NewOAuthHandler(authzStore, gwCodeStore, userDAO, oauthService, cfg.OAuth.ClientID)
 	loginHandler := handler.NewLoginHandler(signinRegistry, otpService, authzStore, gwCodeStore, userDAO, rsaDecryptor, csrfStore)

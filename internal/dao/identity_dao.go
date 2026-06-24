@@ -15,6 +15,9 @@ import (
 type IdentityRepository interface {
 	// FindByTypeIdentifier 按 (type, identifier) 查找登录身份。found=false 表示不存在。
 	FindByTypeIdentifier(ctx context.Context, typ, identifier string) (identity *model.Identity, found bool, err error)
+	// FindByUserUUIDAndType 按 (user_uuid, type) 查找登录身份，用于回查某 User 的邮箱/手机标识。
+	// found=false 表示该 User 未绑定该类型身份。
+	FindByUserUUIDAndType(ctx context.Context, userUUID, typ string) (identity *model.Identity, found bool, err error)
 	// Create 持久化一条 Identity。须在事务内与 User 同步创建（登录即注册）。
 	Create(ctx context.Context, identity *model.Identity) error
 }
@@ -36,6 +39,18 @@ func (d *identityDAO) FindByTypeIdentifier(ctx context.Context, typ, identifier 
 	}
 	if err != nil {
 		return nil, false, fmt.Errorf("按 type+identifier 查询 Identity 失败: %w", err)
+	}
+	return &identity, true, nil
+}
+
+func (d *identityDAO) FindByUserUUIDAndType(ctx context.Context, userUUID, typ string) (*model.Identity, bool, error) {
+	var identity model.Identity
+	err := dbFrom(ctx, d.db).Where("user_uuid = ? AND type = ?", userUUID, typ).First(&identity).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("按 user_uuid+type 查询 Identity 失败: %w", err)
 	}
 	return &identity, true, nil
 }

@@ -44,6 +44,16 @@ func (r *fakeIdentityRepo) FindByTypeIdentifier(_ context.Context, typ, identifi
 	return nil, false, nil
 }
 
+func (r *fakeIdentityRepo) FindByUserUUIDAndType(_ context.Context, userUUID, typ string) (*model.Identity, bool, error) {
+	for _, id := range r.byKey {
+		if id.UserUUID == userUUID && id.Type == typ {
+			cp := *id
+			return &cp, true, nil
+		}
+	}
+	return nil, false, nil
+}
+
 func (r *fakeIdentityRepo) Create(_ context.Context, id *model.Identity) error {
 	r.byKey[id.Type+"|"+id.Identifier] = id
 	return nil

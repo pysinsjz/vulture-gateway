@@ -153,6 +153,17 @@ sequenceDiagram
 **`DELETE /api/v1/devices/{device_id}`**（Bearer）—— 吊销指定 Device。
 → `204 No Content`。bump 目标 Device 的 `token_version` ⇒ 该设备即时登出。
 
+**`GET /api/v1/whoami`**（Bearer）—— 受保护探针：回显当前 access JWT 解析出的身份，证明鉴权链路通畅。
+→ `200`：
+```json
+{ "sub": "用户 uuid", "device_id": "dev_xxx", "email": "pan@example.com" }
+```
+- `sub`：稳定身份锚，即 User 的 `uuid`（ADR-0013）。
+- `device_id`：当前调用方 Device。
+- `email`：该 User 绑定的邮箱（取自 `email` 类型 Identity 的 `identifier`）。未绑定邮箱时为空字符串 `""`。
+
+> `email` 为**尽力而为**字段：回查独立于鉴权链路，回查失败（如 DB 抖动）时返回空字符串且仍 `200`，错误经日志中间件记录，不影响探针对鉴权的核心断言。
+
 ---
 
 ## 横切关注点：`JWTAuth` 中间件

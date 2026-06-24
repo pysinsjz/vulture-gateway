@@ -38,6 +38,7 @@
 | `POST /api/v1/auth/logout` | Bearer 或 body `refresh_token` 兜底 | `204` | 吊销当前 Device |
 | `GET /api/v1/devices` | Bearer | `200` 数组 | 已授权 Device 列表 |
 | `DELETE /api/v1/devices/{device_id}` | Bearer | `204` | 吊销指定 Device |
+| `GET /api/v1/whoami` | Bearer | `200` | 回显当前身份 `{sub, device_id, email}`；`email` 尽力而为，未绑定/回查失败为 `""` |
 | `POST /api/v1/telemetry/install` | Bearer | `200` | 安装遥测（best-effort） |
 | `GET /api/v1/skills` | Bearer | `200` `Page<T>` | skill 列表（无搜索，sort+游标+filter，含 `?category=`） |
 | `GET /api/v1/skills/categories` | Bearer | `200` | skill 分类 + 计数（驱动分组标题，§3.1b） |
