@@ -179,12 +179,9 @@ func (c *httpClient) ResolveSkill(ctx context.Context, slug, hash string) (*Reso
 	return &out, nil
 }
 
-func (c *httpClient) SkillDownloadURL(ctx context.Context, slug, version string) (*DownloadTarget, error) {
+func (c *httpClient) SkillDownloadStreamURL(slug, version string) string {
 	q := url.Values{}
+	q.Set("slug", slug)
 	setIfNotEmpty(q, "version", version)
-	var t DownloadTarget
-	if err := c.get(ctx, "/skills/"+url.PathEscape(slug)+"/download-url", q, &t); err != nil {
-		return nil, err
-	}
-	return &t, nil
+	return c.baseURL + "/download?" + q.Encode()
 }

@@ -122,8 +122,11 @@ func WireApp(cfg *config.Configuration) (*App, error) {
 	oauthHandler := handler.NewOAuthHandler(authzStore, gwCodeStore, userDAO, oauthService, cfg.OAuth.ClientID)
 	loginHandler := handler.NewLoginHandler(signinRegistry, otpService, authzStore, gwCodeStore, userDAO, rsaDecryptor, csrfStore)
 	deviceHandler := handler.NewDeviceHandler(signer, deviceService)
-	pluginHandler := handler.NewPluginHandler(pluginService)
-	skillHandler := handler.NewSkillHandler(skillService)
+	// 下载代理（interim）：把内网 ClawHub 制品字节经网关回传桌面端（路线 A 伪预签名）。客户端无超时，
+	// 由请求 ctx 约束生命周期；待 ClawHub 路线 B（MinIO 真预签名、公网可达）落地后改回直接 302。
+	downloadProxy := handler.NewDownloadProxy(&http.Client{})
+	pluginHandler := handler.NewPluginHandler(pluginService, downloadProxy)
+	skillHandler := handler.NewSkillHandler(skillService, downloadProxy)
 	telemetryHandler := handler.NewTelemetryHandler(telemetryService)
 	llmHandler := handler.NewLLMHandler(llmService, subChecker, meteringService, cfg.LLM.StreamIdleTimeout, cfg.LLM.StreamRequestTimeout, cfg.LLM.MaxRequestBytes)
 

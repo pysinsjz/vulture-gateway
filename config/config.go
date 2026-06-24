@@ -229,7 +229,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("auth.send_max", 5)
 	v.SetDefault("auth.send_window", "1h")
 	v.SetDefault("auth.csrf_ttl", "10m")
-	v.SetDefault("clawhub.base_url", "http://127.0.0.1:3210")
+	v.SetDefault("clawhub.base_url", "http://127.0.0.1:3211/api/v1")
 	v.SetDefault("clawhub.timeout", "10s")
 	v.SetDefault("llm.base_url", "http://127.0.0.1:4000")
 	v.SetDefault("llm.timeout", "30s")

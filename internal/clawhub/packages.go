@@ -155,21 +155,16 @@ func (c *httpClient) GetPackageRelease(ctx context.Context, name, version string
 	return &detail, nil
 }
 
-func (c *httpClient) PackageDownloadURL(ctx context.Context, name, version string) (*DownloadTarget, error) {
+func (c *httpClient) PackageDownloadStreamURL(name, version string) string {
+	u := c.baseURL + "/packages/" + url.PathEscape(name) + "/download"
 	q := url.Values{}
 	setIfNotEmpty(q, "version", version)
-	var t DownloadTarget
-	if err := c.get(ctx, "/packages/"+url.PathEscape(name)+"/download-url", q, &t); err != nil {
-		return nil, err
+	if enc := q.Encode(); enc != "" {
+		u += "?" + enc
 	}
-	return &t, nil
+	return u
 }
 
-func (c *httpClient) PackageArtifactURL(ctx context.Context, name, version string) (*DownloadTarget, error) {
-	path := "/packages/" + url.PathEscape(name) + "/releases/" + url.PathEscape(version) + "/artifact-url"
-	var t DownloadTarget
-	if err := c.get(ctx, path, nil, &t); err != nil {
-		return nil, err
-	}
-	return &t, nil
+func (c *httpClient) PackageArtifactStreamURL(name, version string) string {
+	return c.baseURL + "/packages/" + url.PathEscape(name) + "/versions/" + url.PathEscape(version) + "/artifact/download"
 }

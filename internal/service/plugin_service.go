@@ -183,23 +183,16 @@ func (s *PluginService) GetPluginVersion(ctx context.Context, name, version stri
 	}, nil
 }
 
-// DownloadURL 取 plugin（legacy-zip）的短时效下载 URL。安全门由 ClawHub 强制，
-// 被阻断/未就绪以 *clawhub.Error（403/423/409）上抛，由 handler 透传（#21）。
-func (s *PluginService) DownloadURL(ctx context.Context, name, version string) (string, error) {
-	t, err := s.hub.PackageDownloadURL(ctx, name, version)
-	if err != nil {
-		return "", err
-	}
-	return t.URL, nil
+// DownloadStreamURL 返回 plugin（legacy-zip）流式下载端点的绝对 URL，供网关反代字节透传回桌面端
+// （interim 路线 A）。安全门由 ClawHub 在该端点内强制（getReleaseSecurityBlock → 403/410/451），
+// 反代时原样透传状态码（#21）。
+func (s *PluginService) DownloadStreamURL(name, version string) string {
+	return s.hub.PackageDownloadStreamURL(name, version)
 }
 
-// ArtifactURL 取 plugin（npm-pack .tgz）的短时效下载 URL。
-func (s *PluginService) ArtifactURL(ctx context.Context, name, version string) (string, error) {
-	t, err := s.hub.PackageArtifactURL(ctx, name, version)
-	if err != nil {
-		return "", err
-	}
-	return t.URL, nil
+// ArtifactStreamURL 返回 plugin（npm-pack .tgz）流式下载端点的绝对 URL。
+func (s *PluginService) ArtifactStreamURL(name, version string) string {
+	return s.hub.PackageArtifactStreamURL(name, version)
 }
 
 // translatePackage 把 ClawHub PackageListItem 翻译为对外 PluginListItem。

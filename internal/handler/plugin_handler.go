@@ -3,7 +3,6 @@ package handler
 import (
 	"errors"
 	"net/http"
-	"net/url"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
@@ -17,11 +16,12 @@ import (
 // 管理 API 族：RESTful 真实状态码 + ApiError（ADR-0011）。
 type PluginHandler struct {
 	svc *service.PluginService
+	dl  *downloadProxy
 }
 
-// NewPluginHandler 构造 handler。
-func NewPluginHandler(svc *service.PluginService) *PluginHandler {
-	return &PluginHandler{svc: svc}
+// NewPluginHandler 构造 handler。dl 用于把内网 ClawHub 的制品字节代理回传桌面端（见 downloadProxy）。
+func NewPluginHandler(svc *service.PluginService, dl *downloadProxy) *PluginHandler {
+	return &PluginHandler{svc: svc, dl: dl}
 }
 
 // ListPlugins 列出 plugin（无搜索，sort+游标+filter + X-Platform/X-App-Version 兼容过滤）。
@@ -73,29 +73,21 @@ func (h *PluginHandler) GetPluginVersion(c *gin.Context) {
 	c.JSON(http.StatusOK, detail)
 }
 
-// DownloadPlugin 下载 plugin（legacy-zip）：302 跳短时效 R2 URL，字节不经网关。
-// 安全门由 ClawHub 强制：被阻断 403（blocked/scan:*）、pending 423/409，经 writeClawHubError 透传。
+// DownloadPlugin 下载 plugin（legacy-zip）：网关反代 ClawHub 流式端点 GET {base}/packages/{name}/download?version=，
+// 把字节透传回桌面端（interim 路线 A，见 downloadProxy；待路线 B 改直接 302 到 MinIO 公网）。
+// 安全门由 ClawHub 在流式端点内强制（getReleaseSecurityBlock → 403/410/451），反代时原样透传状态码。
 //
 //	GET /api/v1/plugins/{name}/download?version=  (Bearer)
 func (h *PluginHandler) DownloadPlugin(c *gin.Context) {
-	target, err := h.svc.DownloadURL(c.Request.Context(), c.Param("name"), c.Query("version"))
-	if err != nil {
-		writeClawHubError(c, err)
-		return
-	}
-	writeDownloadRedirect(c, target)
+	h.dl.stream(c, h.svc.DownloadStreamURL(c.Param("name"), c.Query("version")))
 }
 
-// DownloadPluginArtifact 下载 plugin（npm-pack .tgz）：302 跳短时效 R2 URL。
+// DownloadPluginArtifact 下载 plugin（npm-pack .tgz）：反代 ClawHub
+// GET {base}/packages/{name}/versions/{version}/artifact/download，同 DownloadPlugin。
 //
 //	GET /api/v1/plugins/{name}/versions/{version}/artifact/download  (Bearer)
 func (h *PluginHandler) DownloadPluginArtifact(c *gin.Context) {
-	target, err := h.svc.ArtifactURL(c.Request.Context(), c.Param("name"), c.Param("version"))
-	if err != nil {
-		writeClawHubError(c, err)
-		return
-	}
-	writeDownloadRedirect(c, target)
+	h.dl.stream(c, h.svc.ArtifactStreamURL(c.Param("name"), c.Param("version")))
 }
 
 // PluginSecurity 单查 plugin 版本的安装阻断信号（PluginTrust，blockedFromDownload 权威）。
@@ -108,25 +100,6 @@ func (h *PluginHandler) PluginSecurity(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, trust)
-}
-
-// writeDownloadRedirect 校验 ClawHub 返回的下载地址后发 302。无效地址收敛为 502，
-// 避免把畸形/内网地址作为 Location 暴露给客户端。
-func writeDownloadRedirect(c *gin.Context, rawURL string) {
-	if !isAbsoluteHTTPURL(rawURL) {
-		apierror.Abort(c, http.StatusBadGateway, "upstream_unavailable", "注册中心返回了无效的下载地址")
-		return
-	}
-	c.Redirect(http.StatusFound, rawURL)
-}
-
-// isAbsoluteHTTPURL 判定字符串为带 host 的绝对 http/https URL。
-func isAbsoluteHTTPURL(raw string) bool {
-	u, err := url.Parse(raw)
-	if err != nil || !u.IsAbs() || u.Host == "" {
-		return false
-	}
-	return u.Scheme == "https" || u.Scheme == "http"
 }
 
 // parseLimit 解析可选的 limit query。非负整数校验失败时写 400 并返回 ok=false。

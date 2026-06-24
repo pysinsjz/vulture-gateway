@@ -13,11 +13,12 @@ import (
 // 管理 API 族：RESTful 真实状态码 + ApiError（ADR-0011）。
 type SkillHandler struct {
 	svc *service.SkillService
+	dl  *downloadProxy
 }
 
-// NewSkillHandler 构造 handler。
-func NewSkillHandler(svc *service.SkillService) *SkillHandler {
-	return &SkillHandler{svc: svc}
+// NewSkillHandler 构造 handler。dl 用于把内网 ClawHub 的制品字节代理回传桌面端（见 downloadProxy）。
+func NewSkillHandler(svc *service.SkillService, dl *downloadProxy) *SkillHandler {
+	return &SkillHandler{svc: svc, dl: dl}
 }
 
 // ListSkills 列出 skill（无搜索，sort+游标+category filter + X-Platform 平台过滤）。
@@ -101,17 +102,14 @@ func (h *SkillHandler) ResolveSkill(c *gin.Context) {
 	c.JSON(http.StatusOK, res)
 }
 
-// DownloadSkill 下载 skill：302 跳短时效 R2 URL，字节不经网关。version 为空取 latest。
-// 安全门由 ClawHub 强制（decision=fail → 403），经 writeClawHubError 透传。
+// DownloadSkill 下载 skill：网关反代 ClawHub 流式下载端点 GET {base}/download?slug=&version=，
+// 把字节透传回桌面端（interim 路线 A，见 downloadProxy；待路线 B 改直接 302 到 MinIO 公网）。
+// version 为空取 latest。安全门由 ClawHub 在流式端点内强制（decision=fail / 文件访问门 → 403/410/451），
+// 反代时原样透传该状态码。
 //
 //	GET /api/v1/skills/{slug}/download?version=  (Bearer)
 func (h *SkillHandler) DownloadSkill(c *gin.Context) {
-	target, err := h.svc.DownloadURL(c.Request.Context(), c.Param("slug"), c.Query("version"))
-	if err != nil {
-		writeClawHubError(c, err)
-		return
-	}
-	writeDownloadRedirect(c, target)
+	h.dl.stream(c, h.svc.DownloadStreamURL(c.Param("slug"), c.Query("version")))
 }
 
 // SecurityVerdicts 批量查询 skill 安全裁决（1–100 项）。

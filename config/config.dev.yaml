@@ -47,8 +47,9 @@ auth:
 #       enabled: true
 
 # 内网 ClawHub（fork 裁剪版注册中心，ADR-0006）：网关鉴权后转发 skill/plugin 查询。纯内网、无鉴权。
+# base_url 指向 Convex HTTP Actions 站点口（3211，非客户端 API 口 3210）+ httpRouter 固有前缀 /api/v1。
 clawhub:
-  base_url: "http://127.0.0.1:3210"
+  base_url: "http://127.0.0.1:3211/api/v1"
   timeout: "10s"
 
 # LLM 代理（litellm proxy，ADR-0005）：网关鉴权后转发，注入 virtual key。key 建议用 VG_LLM_VIRTUAL_KEY 覆盖。

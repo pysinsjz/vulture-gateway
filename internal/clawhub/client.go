@@ -27,11 +27,13 @@ type PackagesClient interface {
 	GetPackage(ctx context.Context, name string) (*PackageDetail, error)
 	// GetPackageRelease 调用 ClawHub GET /packages/{name}/releases/{version}，返回指定版本详情。
 	GetPackageRelease(ctx context.Context, name, version string) (*PackageReleaseDetail, error)
-	// PackageDownloadURL 调用 ClawHub GET /packages/{name}/download-url（legacy-zip），
-	// ClawHub 内部强制安全门 + 签发短时效 URL；被阻断/未就绪返 403/423/409（#21）。
-	PackageDownloadURL(ctx context.Context, name, version string) (*DownloadTarget, error)
-	// PackageArtifactURL 调用 ClawHub GET /packages/{name}/releases/{version}/artifact-url（npm-pack .tgz）。
-	PackageArtifactURL(ctx context.Context, name, version string) (*DownloadTarget, error)
+	// PackageDownloadStreamURL 构造 plugin（legacy-zip）流式下载端点的绝对 URL：
+	// GET {base}/packages/{name}/download?version=。网关反代此端点把字节透传回桌面端（interim
+	// 路线 A）；安全门由 ClawHub 在该端点内强制（getReleaseSecurityBlock，返 403/410/451 等）。
+	PackageDownloadStreamURL(name, version string) string
+	// PackageArtifactStreamURL 构造 plugin（npm-pack .tgz）流式下载端点的绝对 URL：
+	// GET {base}/packages/{name}/versions/{version}/artifact/download。
+	PackageArtifactStreamURL(name, version string) string
 	// PackageSecurity 调用 ClawHub GET /packages/{name}/releases/{version}/security，
 	// 返回 PluginTrust（blockedFromDownload 为权威阻断信号，#22）。
 	PackageSecurity(ctx context.Context, name, version string) (*PluginTrust, error)
@@ -49,9 +51,10 @@ type SkillsClient interface {
 	GetSkillVersion(ctx context.Context, slug, version string) (*SkillVersionDetail, error)
 	// ResolveSkill 调用 ClawHub GET /skills/{slug}/resolve?hash=，把本地指纹映射到已发布版本。
 	ResolveSkill(ctx context.Context, slug, hash string) (*ResolveResult, error)
-	// SkillDownloadURL 调用 ClawHub GET /skills/{slug}/download-url，ClawHub 内部强制安全门
-	// （decision=fail → 403）+ 签发短时效 URL；version 为空取 latest（#21）。
-	SkillDownloadURL(ctx context.Context, slug, version string) (*DownloadTarget, error)
+	// SkillDownloadStreamURL 构造 skill 流式下载端点的绝对 URL：GET {base}/download?slug=&version=。
+	// 网关反代此端点把字节透传回桌面端（interim 路线 A）；version 为空取 latest；安全门由 ClawHub
+	// 在该端点内强制（getPublicSkillFileAccessBlock / decision=fail，返 403/410/451 等）。
+	SkillDownloadStreamURL(slug, version string) string
 	// SecurityVerdicts 调用 ClawHub POST /skills/-/security-verdicts，批量（1–100）返回安全裁决（#22）。
 	SecurityVerdicts(ctx context.Context, items []VerdictRequestItem) (*SecurityVerdictResult, error)
 }
@@ -79,12 +82,6 @@ type PageParams struct {
 type Category struct {
 	ID    string `json:"id"`
 	Label string `json:"label"`
-}
-
-// DownloadTarget 是 ClawHub 签发的制品下载目标（短时效 R2 presigned URL）。
-// 安全门由 ClawHub 在签发前强制：被阻断/未就绪不返此体，而是 403/423/409（#21）。
-type DownloadTarget struct {
-	URL string `json:"url"`
 }
 
 // Error 表示 ClawHub 返回的非 2xx 响应。Status 用于网关侧错误重映射（ADR-0011）。

@@ -162,43 +162,26 @@ func TestReportInstall_PostsRoots(t *testing.T) {
 	}
 }
 
-// 下载 URL：解析 ClawHub 签发地址，version 作 query 下发。
-func TestPackageDownloadURL_ParsesTarget(t *testing.T) {
-	stub := newMuxStub(t, map[string]func() (int, string){
-		"/packages/@v/x/download-url": func() (int, string) {
-			return http.StatusOK, `{"url":"https://r2.example.com/x.zip?sig=abc"}`
-		},
-	})
-	c := clawhub.NewHTTPClient(stub.srv.URL, stub.srv.Client())
+// 流式下载 URL 构造（反代目标）：skill 走顶层 /download?slug=&version=，
+// plugin legacy-zip 走 /packages/{name}/download?version=，npm-pack 走 /packages/{name}/versions/{v}/artifact/download。
+func TestDownloadStreamURLs(t *testing.T) {
+	base := "http://clawhub.internal:3211/api/v1"
+	c := clawhub.NewHTTPClient(base, nil)
 
-	target, err := c.PackageDownloadURL(context.Background(), "@v/x", "1.2.0")
-	if err != nil {
-		t.Fatalf("PackageDownloadURL 失败: %v", err)
+	if got, want := c.SkillDownloadStreamURL("gifgrep", "1.2.0"), base+"/download?slug=gifgrep&version=1.2.0"; got != want {
+		t.Errorf("SkillDownloadStreamURL = %q, 期望 %q", got, want)
 	}
-	if target.URL != "https://r2.example.com/x.zip?sig=abc" {
-		t.Errorf("url 解析错误: %q", target.URL)
+	if got, want := c.SkillDownloadStreamURL("gifgrep", ""), base+"/download?slug=gifgrep"; got != want {
+		t.Errorf("SkillDownloadStreamURL(latest) = %q, 期望 %q", got, want)
 	}
-	if stub.lastRaw != "version=1.2.0" {
-		t.Errorf("version query 未下发: %q", stub.lastRaw)
+	if got, want := c.PackageDownloadStreamURL("@v/x", "1.2.0"), base+"/packages/@v%2Fx/download?version=1.2.0"; got != want {
+		t.Errorf("PackageDownloadStreamURL = %q, 期望 %q", got, want)
 	}
-}
-
-// 安全门：ClawHub 下载端点 403（blocked）以 *clawhub.Error 携带状态码上抛。
-func TestSkillDownloadURL_BlockedPassesThrough(t *testing.T) {
-	stub := newMuxStub(t, map[string]func() (int, string){
-		"/skills/evil/download-url": func() (int, string) {
-			return http.StatusForbidden, `{"error":"blocked","message":"scan:malicious"}`
-		},
-	})
-	c := clawhub.NewHTTPClient(stub.srv.URL, stub.srv.Client())
-
-	_, err := c.SkillDownloadURL(context.Background(), "evil", "")
-	hubErr, ok := err.(*clawhub.Error)
-	if !ok {
-		t.Fatalf("期望 *clawhub.Error, 实际 %T", err)
+	if got, want := c.PackageDownloadStreamURL("@v/x", ""), base+"/packages/@v%2Fx/download"; got != want {
+		t.Errorf("PackageDownloadStreamURL(latest) = %q, 期望 %q", got, want)
 	}
-	if hubErr.Status != http.StatusForbidden || hubErr.Code != "blocked" {
-		t.Errorf("阻断错误映射错误: status=%d code=%q", hubErr.Status, hubErr.Code)
+	if got, want := c.PackageArtifactStreamURL("@v/x", "1.2.0"), base+"/packages/@v%2Fx/versions/1.2.0/artifact/download"; got != want {
+		t.Errorf("PackageArtifactStreamURL = %q, 期望 %q", got, want)
 	}
 }
 

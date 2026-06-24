@@ -323,7 +323,7 @@ sequenceDiagram
     participant D as 桌面端
     participant G as 网关
     participant R as ClawHub(内网)
-    participant S as 存储(Convex file-storage / R2)
+    participant S as 存储(MinIO，仅路线 B 直连)
 
     D->>G: GET /skills/{slug} (Bearer, X-App-Version, X-Platform)
     G->>R: 转发
@@ -334,22 +334,22 @@ sequenceDiagram
     R->>D: SkillVersionDetail（含 artifact.sha256）
     Note over D: 安全裁决 §3.6：POST security-verdicts [{slug, version:resolvedVersion}]<br/>decision=fail ⇒ 拒装
     D->>G: GET /skills/{slug}/download?version={resolvedVersion}
-    Note over G: 鉴权 + 安全门(skill 看 decision) → 取制品下载 URL
-    G-->>D: 302 Location: 短时效下载 URL
-    D->>S: GET 下载 URL
-    S-->>D: ZIP 字节
-    Note over D: 字节 SHA256 ↔ SkillVersionDetail.artifact.sha256 → 解压到 skills/{slug}（路径防穿越）
+    Note over G: 鉴权 → 反代 ClawHub 流式端点（安全门在内强制）
+    G->>R: GET /download?slug=&version=（内网反代）
+    R-->>G: 200 application/zip 字节（含 X-ClawHub-Artifact-Sha256 头）
+    G-->>D: 200 application/zip 字节（透传状态码 + 头 + 字节）
+    Note over D: 字节 SHA256 ↔ artifact.sha256（版本详情 或 X-ClawHub-Artifact-Sha256 头）→ 解压到 skills/{slug}（路径防穿越）
     Note over D: 算 fingerprint → 写 origin.json + 更新 lock.skills[slug]
     D->>G: POST /api/v1/telemetry/install（§3.8）
 ```
 
 **下载 `GET /skills/{slug}/download?version=`**（缺 version 取 latest）
-- 鉴权 + 安全门（**skill** 看 security-verdicts `decision=fail`、**plugin** 看 `PluginTrust.blockedFromDownload`，命中 ⇒ `403`、不签发 URL）通过后，返回 **`302`**，`Location` 头携带**短时效制品下载 URL**（Convex file-storage 签发，R2 backed；见 clawhub-integration.md）。
-- 桌面端跟随 302 **直连存储**下载 `application/zip` 字节，不经网关。
-- **完整性**：期望 sha256 取自版本详情（skill=`version.artifact.sha256`，plugin=`artifact.sha256`）；下载后对字节算 SHA256 比对，不符则丢弃重试。
-- 预签名 URL **过期 / 403** ⇒ 重新请求本端点换新 URL。
+- 鉴权 + 安全门（**skill** 看 security-verdicts `decision=fail`、**plugin** 看 `PluginTrust.blockedFromDownload`，命中 ⇒ `403`/`410`/`451`）通过后，网关**直接回传 `200` + `application/zip` 字节**（当前 interim：网关反向代理内网 ClawHub 流式端点，字节经网关；见 clawhub-integration.md「下载链路」与 clawhub-gateway-contract.md §0）。
+- **桌面端做法（向前兼容，推荐写法）**：`GET` 该端点、**跟随 3xx 重定向**、把响应体当作制品字节读取。当前 interim 直接 `200` 拿字节；将来切路线 B（MinIO 真预签名）时本端点改 `302` 跳公网存储 URL、HTTP 客户端自动跟随取字节——**桌面端无需区分两种形态**。
+- **完整性**：期望 sha256 取自版本详情（skill=`version.artifact.sha256`，plugin=`artifact.sha256`）；网关下载响应亦透传 `X-ClawHub-Artifact-Sha256` 头可作兜底。下载后对字节算 SHA256 比对，不符则丢弃重试。
+- 安全门 `403`（含 `scan:*`/`blocked`）/ 未就绪 `423`·`409` / 软删除 `410` 由网关**原样透传 ClawHub 流式端点的状态码 + body**——按状态码分流（`403` 拒装不重登，`410` 已下架，`423`/`409` 稍后重试）。
 
-**Plugin 下载**：下载前先 `GET /plugins/{name}/versions/{version}/security`，`blockedFromDownload=true` 即拒装（与 skill 的 security-verdicts 对称）。按版本详情 `artifact.kind` 选端点——`legacy-zip` 走 `GET /plugins/{name}/download?version=`，`npm-pack` 走 `GET /plugins/{name}/versions/{version}/artifact/download`（取 `.tgz`）；两者同样 `302` 跳短时效下载 URL。
+**Plugin 下载**：下载前先 `GET /plugins/{name}/versions/{version}/security`，`blockedFromDownload=true` 即拒装（与 skill 的 security-verdicts 对称）。按版本详情 `artifact.kind` 选端点——`legacy-zip` 走 `GET /plugins/{name}/download?version=`，`npm-pack` 走 `GET /plugins/{name}/versions/{version}/artifact/download`（取 `.tgz`）；两者同为网关反代、当前 interim 直接 `200` 回传字节（同上向前兼容写法）。
 
 **写状态**（成功安装后）：
 ```ts
@@ -527,7 +527,7 @@ App 二进制自更新**不走 ClawHub**，见 [distribution.md](./distribution.
 - [ ] `.vulture/lock.json` + 每包 `.vulture/origin.json` 读写
 - [ ] 指纹算法（§1.3）与服务端逐字一致
 - [ ] 列表/详情/版本拉取（游标分页，无搜索）
-- [ ] 安装：security-verdicts 检查 → 下载（302→存储直连）→ **完整性校验**（字节 sha256 比对版本详情）→ 解压（路径防穿越）→ 写状态 → 遥测
+- [ ] 安装：security-verdicts 检查 → 下载（`GET …/download`，跟随 3xx、读响应体字节；interim 直接 200，路线 B 自动跟随 302）→ **完整性校验**（字节 sha256 比对版本详情 / `X-ClawHub-Artifact-Sha256` 头）→ 解压（路径防穿越）→ 写状态 → 遥测
 - [ ] Skill 更新：本地指纹 → `/skills/{slug}/resolve` → 判定（已最新/本地改动/有新版）
 - [ ] Plugin 更新：`GET /plugins/{name}` 取最新版本 → 与 `lock.plugins[name].version` 版本比较（非指纹）
 - [ ] pin/unpin/uninstall 本地语义（skill=slug/`skills/`，plugin=name/`plugins/`）

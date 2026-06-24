@@ -212,14 +212,11 @@ func (s *SkillService) ResolveSkill(ctx context.Context, slug, hash string) (*Re
 	}, nil
 }
 
-// DownloadURL 取 skill 的短时效下载 URL。version 为空取 latest；安全门由 ClawHub 强制
-// （decision=fail → 403），被阻断/未就绪以 *clawhub.Error 上抛由 handler 透传（#21）。
-func (s *SkillService) DownloadURL(ctx context.Context, slug, version string) (string, error) {
-	t, err := s.hub.SkillDownloadURL(ctx, slug, version)
-	if err != nil {
-		return "", err
-	}
-	return t.URL, nil
+// DownloadStreamURL 返回 skill 流式下载端点的绝对 URL，供网关反代把字节透传回桌面端（interim
+// 路线 A，见 handler.downloadProxy）。version 为空取 latest；安全门由 ClawHub 在该端点内强制
+// （decision=fail / getPublicSkillFileAccessBlock → 403/410/451），反代时原样透传状态码（#21）。
+func (s *SkillService) DownloadStreamURL(slug, version string) string {
+	return s.hub.SkillDownloadStreamURL(slug, version)
 }
 
 func translateSkillListItem(sk clawhub.SkillListItem) SkillListItem {

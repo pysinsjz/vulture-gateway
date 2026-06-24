@@ -21,7 +21,12 @@ flowchart LR
 
 - 桌面端只认网关：所有 `/api/v1/skills|plugins|.../resolve|.../download` 经网关鉴权（Casdoor/JWT + Device，见 `auth.md`）后转发给内网 forked ClawHub。
 - **ClawHub 自身无鉴权**：去掉 GitHub OAuth / Convex Auth，只接受来自网关的内网调用。
-- **制品存储 = R2**：自托管 Convex 的 file-storage 后端配成 Cloudflare R2（S3 兼容）；下载端点 `302` 跳 file-storage 签发的短时效 URL，桌面端直连存储取字节。
+- **制品存储（目标态 = 路线 B）**：自托管 Convex 的 file-storage 后端配成 **自托管 MinIO（S3 兼容；R2 因阿里云 ECS 出网不通已弃用）**；下载端点 `302` 跳 file-storage 签发的短时效预签名 URL，桌面端直连存储取字节、用 `artifact.sha256` 自校验。
+- **下载链路当前态（interim = 路线 A）**：MinIO 真预签名尚未落地，artifact 字节由 ClawHub 流式端点直吐。桌面端到不了内网 ClawHub，故**网关不 302**，而是**直接反向代理 ClawHub 的流式端点**——服务端 GET（内网可达）后把状态码 + 白名单响应头 + 字节透传回桌面端（`internal/handler/download_proxy.go`）：
+  - skill：网关 `/skills/{slug}/download` → 反代 ClawHub `GET /api/v1/download?slug=&version=`
+  - plugin（legacy-zip）：网关 `/plugins/{name}/download` → 反代 `GET /api/v1/packages/{name}/download?version=`
+  - plugin（npm-pack）：网关 `/plugins/{name}/versions/{v}/artifact/download` → 反代 `GET /api/v1/packages/{name}/versions/{v}/artifact/download`
+  安全门由 ClawHub 在流式端点内强制（`getReleaseSecurityBlock`/`getPublicSkillFileAccessBlock` → 403/410/451），网关原样透传该状态码。**仅网关单侧改动，ClawHub 无需任何代码/env 变更**；其 `download-url`/`artifact-url` JSON 端点不在网关下载路径上。待路线 B 落地，ClawHub 流式端点改 302 跳 MinIO 公网、网关原样透传该 302（桌面端直连存储），迁移对网关透明。详见 [clawhub-gateway-contract.md](./clawhub-gateway-contract.md)。
 
 ---
 

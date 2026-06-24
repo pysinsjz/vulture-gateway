@@ -15,7 +15,6 @@ type fakeSkills struct {
 	versions *clawhub.SkillVersionPage
 	version  *clawhub.SkillVersionDetail
 	resolve  *clawhub.ResolveResult
-	download *clawhub.DownloadTarget
 	verdicts *clawhub.SecurityVerdictResult
 	gotItems []clawhub.VerdictRequestItem
 	gotHash  string
@@ -38,8 +37,12 @@ func (f *fakeSkills) ResolveSkill(_ context.Context, _, hash string) (*clawhub.R
 	f.gotHash = hash
 	return f.resolve, f.err
 }
-func (f *fakeSkills) SkillDownloadURL(_ context.Context, _, _ string) (*clawhub.DownloadTarget, error) {
-	return f.download, f.err
+func (f *fakeSkills) SkillDownloadStreamURL(slug, version string) string {
+	u := "http://clawhub.internal:3211/api/v1/download?slug=" + slug
+	if version != "" {
+		u += "&version=" + version
+	}
+	return u
 }
 func (f *fakeSkills) SecurityVerdicts(_ context.Context, items []clawhub.VerdictRequestItem) (*clawhub.SecurityVerdictResult, error) {
 	f.gotItems = items
@@ -191,16 +194,11 @@ func TestSecurityVerdicts_Translates(t *testing.T) {
 	}
 }
 
-// 下载 URL：取回 ClawHub 签发地址。
-func TestSkillDownloadURL(t *testing.T) {
-	fake := &fakeSkills{download: &clawhub.DownloadTarget{URL: "https://r2.example.com/s.zip?sig=x"}}
-	svc := service.NewSkillService(fake)
+// 流式下载 URL：委托 ClawHub client 构造反代目标地址。
+func TestSkillDownloadStreamURL(t *testing.T) {
+	svc := service.NewSkillService(&fakeSkills{})
 
-	url, err := svc.DownloadURL(context.Background(), "gifgrep", "")
-	if err != nil {
-		t.Fatalf("DownloadURL 失败: %v", err)
-	}
-	if url != "https://r2.example.com/s.zip?sig=x" {
-		t.Errorf("下载 URL 错误: %q", url)
+	if got, want := svc.DownloadStreamURL("gifgrep", "1.2.0"), "http://clawhub.internal:3211/api/v1/download?slug=gifgrep&version=1.2.0"; got != want {
+		t.Errorf("DownloadStreamURL = %q, 期望 %q", got, want)
 	}
 }

@@ -15,7 +15,6 @@ type fakeClawHub struct {
 	page       *clawhub.PackagePage
 	detail     *clawhub.PackageDetail
 	release    *clawhub.PackageReleaseDetail
-	download   *clawhub.DownloadTarget
 	trust      *clawhub.PluginTrust
 	gotVersion string
 	err        error
@@ -34,14 +33,18 @@ func (f *fakeClawHub) GetPackageRelease(_ context.Context, _, _ string) (*clawhu
 	return f.release, f.err
 }
 
-func (f *fakeClawHub) PackageDownloadURL(_ context.Context, _, version string) (*clawhub.DownloadTarget, error) {
+func (f *fakeClawHub) PackageDownloadStreamURL(name, version string) string {
 	f.gotVersion = version
-	return f.download, f.err
+	u := "http://clawhub.internal:3211/api/v1/packages/" + name + "/download"
+	if version != "" {
+		u += "?version=" + version
+	}
+	return u
 }
 
-func (f *fakeClawHub) PackageArtifactURL(_ context.Context, _, version string) (*clawhub.DownloadTarget, error) {
+func (f *fakeClawHub) PackageArtifactStreamURL(name, version string) string {
 	f.gotVersion = version
-	return f.download, f.err
+	return "http://clawhub.internal:3211/api/v1/packages/" + name + "/versions/" + version + "/artifact/download"
 }
 
 func (f *fakeClawHub) PackageSecurity(_ context.Context, _, _ string) (*clawhub.PluginTrust, error) {
@@ -226,22 +229,15 @@ func TestGetPluginVersion_Translates(t *testing.T) {
 	}
 }
 
-// 下载 URL：取回 ClawHub 签发地址，version 透传。
-func TestPluginDownloadURL(t *testing.T) {
-	fake := &fakeClawHub{download: &clawhub.DownloadTarget{URL: "https://r2.example.com/x.zip?sig=abc"}}
-	svc := service.NewPluginService(fake)
+// 流式下载 URL：legacy-zip 走 /packages/{name}/download?version=，npm-pack 走 /versions/{v}/artifact/download。
+func TestPluginDownloadStreamURL(t *testing.T) {
+	svc := service.NewPluginService(&fakeClawHub{})
 
-	url, err := svc.DownloadURL(context.Background(), "@v/x", "1.2.0")
-	if err != nil {
-		t.Fatalf("DownloadURL 失败: %v", err)
+	if got, want := svc.DownloadStreamURL("@v/x", "1.2.0"), "http://clawhub.internal:3211/api/v1/packages/@v/x/download?version=1.2.0"; got != want {
+		t.Errorf("DownloadStreamURL = %q, 期望 %q", got, want)
 	}
-	if url != "https://r2.example.com/x.zip?sig=abc" || fake.gotVersion != "1.2.0" {
-		t.Errorf("下载 URL/version 错误: url=%q version=%q", url, fake.gotVersion)
-	}
-
-	artURL, err := svc.ArtifactURL(context.Background(), "@v/x", "1.2.0")
-	if err != nil || artURL == "" {
-		t.Errorf("ArtifactURL 失败: url=%q err=%v", artURL, err)
+	if got, want := svc.ArtifactStreamURL("@v/x", "1.2.0"), "http://clawhub.internal:3211/api/v1/packages/@v/x/versions/1.2.0/artifact/download"; got != want {
+		t.Errorf("ArtifactStreamURL = %q, 期望 %q", got, want)
 	}
 }
 
@@ -271,13 +267,3 @@ func TestPluginSecurity_Translates(t *testing.T) {
 	}
 }
 
-// 安全门阻断：ClawHub 返 403 → 原样上抛由 handler 透传。
-func TestPluginDownloadURL_Blocked(t *testing.T) {
-	hubErr := &clawhub.Error{Status: 403, Code: "blocked"}
-	fake := &fakeClawHub{err: hubErr}
-	svc := service.NewPluginService(fake)
-
-	if _, err := svc.DownloadURL(context.Background(), "@v/x", ""); !errors.Is(err, hubErr) {
-		t.Errorf("应上抛 403 阻断错误, 实际 %v", err)
-	}
-}
