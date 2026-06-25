@@ -101,8 +101,15 @@ func WireApp(cfg *config.Configuration) (*App, error) {
 	skillService := service.NewSkillService(clawHubClient)
 	telemetryService := service.NewTelemetryService(clawHubClient)
 
-	llmClient := litellm.NewHTTPClient(cfg.LLM.BaseURL, cfg.LLM.VirtualKey, &http.Client{Timeout: cfg.LLM.Timeout})
-	llmService := service.NewLLMService(llmClient)
+	// ADR-0014：Proxy/Admin 双客户端角色分离。Proxy 转发推理（每用户注入 virtual key）；
+	// Admin 持 Master Key 签发/删用户 key，永不转发推理。
+	llmClient := litellm.NewHTTPClient(cfg.LLM.BaseURL, &http.Client{Timeout: cfg.LLM.Timeout})
+	llmAdminClient := litellm.NewAdminClient(cfg.LLM.BaseURL, cfg.LLM.MasterKey, &http.Client{Timeout: cfg.LLM.Timeout})
+	// 用户 virtual key get-or-create：DB 真相源 + Redis 缓存热路径 + 复用 auth.Locker 做分布式锁防双签。
+	vkeyDAO := dao.NewUserVirtualKeyDAO(gdb)
+	vkeyCache := service.NewRedisVKeyCache(rdb, cfg.LLM.VKeyCacheTTL)
+	virtualKeyService := service.NewVirtualKeyService(vkeyDAO, llmAdminClient, vkeyCache, locker)
+	llmService := service.NewLLMService(llmClient, virtualKeyService)
 	// 订阅检查为占位（#25）：active = !StubNoSubscription，待计费 C 域接入真实 Subscription。
 	subChecker := service.NewStubSubscriptionChecker(!cfg.LLM.StubNoSubscription)
 	// 计量与额度（#26）：ZSET 双窗（5h/周）+ 占位配额/定价，待计费 C 域接入真实数值。
@@ -120,7 +127,7 @@ func WireApp(cfg *config.Configuration) (*App, error) {
 	probeHandler := handler.NewProbeHandler(identityDAO)
 	scaffoldHandler := handler.NewScaffoldHandler(signer, tvs)
 	oauthHandler := handler.NewOAuthHandler(authzStore, gwCodeStore, userDAO, oauthService, cfg.OAuth.ClientID)
-	loginHandler := handler.NewLoginHandler(signinRegistry, otpService, authzStore, gwCodeStore, userDAO, rsaDecryptor, csrfStore)
+	loginHandler := handler.NewLoginHandler(signinRegistry, otpService, authzStore, gwCodeStore, userDAO, virtualKeyService, rsaDecryptor, csrfStore)
 	deviceHandler := handler.NewDeviceHandler(signer, deviceService)
 	// 下载代理（interim）：把内网 ClawHub 制品字节经网关回传桌面端（路线 A 伪预签名）。客户端无超时，
 	// 由请求 ctx 约束生命周期；待 ClawHub 路线 B（MinIO 真预签名、公网可达）落地后改回直接 302。

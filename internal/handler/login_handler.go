@@ -1,12 +1,15 @@
 package handler
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/pem"
 	"errors"
 	"html/template"
+	"log"
 	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -17,6 +20,15 @@ import (
 	"github.com/pysinsjz/vulture-gateway/internal/service"
 )
 
+// VirtualKeyProvisioner 抽象「按用户 get-or-create litellm virtual key」（ADR-0014 eager 触发）。
+// *service.VirtualKeyService 满足；接口化以便登录 handler 单测无需真实 litellm。
+type VirtualKeyProvisioner interface {
+	GetOrCreateVirtualKey(ctx context.Context, userUUID string) (string, error)
+}
+
+// eagerProvisionTimeout 是 eager 异步签发的独立 ctx 上限（签发是一次 litellm 往返，竞争时含等锁）。
+const eagerProvisionTimeout = 15 * time.Second
+
 // LoginHandler 承接网关自建登录页（ADR-0013）：渲染登录页、处理凭据提交与验证码下发，
 // 成功后续接既有 GW_CODE 签发与回跳桌面端（下游零改动）。
 type LoginHandler struct {
@@ -25,18 +37,20 @@ type LoginHandler struct {
 	authz    *auth.AuthzStore
 	gwcodes  *auth.GWCodeStore
 	users    dao.UserRepository
+	vkeys    VirtualKeyProvisioner
 	rsa      *auth.RSADecryptor
 	csrf     *auth.CSRFStore
 	tmpl     *template.Template
 }
 
-// NewLoginHandler 构造登录页 handler。
+// NewLoginHandler 构造登录页 handler。vkeys 为 ADR-0014 eager 签发入口（登录即注册成功后触发，失败不阻断）。
 func NewLoginHandler(
 	registry *signin.Registry,
 	otpSvc *service.OTPService,
 	authz *auth.AuthzStore,
 	gwcodes *auth.GWCodeStore,
 	users dao.UserRepository,
+	vkeys VirtualKeyProvisioner,
 	rsa *auth.RSADecryptor,
 	csrf *auth.CSRFStore,
 ) *LoginHandler {
@@ -46,6 +60,7 @@ func NewLoginHandler(
 		authz:    authz,
 		gwcodes:  gwcodes,
 		users:    users,
+		vkeys:    vkeys,
 		rsa:      rsa,
 		csrf:     csrf,
 		tmpl:     template.Must(template.New("login").Parse(loginPageTmpl)),
@@ -167,6 +182,11 @@ func (h *LoginHandler) Login(c *gin.Context) {
 		return
 	}
 
+	// ADR-0014 eager 触发：登录即注册成功后签一次 litellm virtual key。幂等（GetOrCreate）。
+	// 异步 + 独立 ctx：不阻塞登录响应（签发是一次 litellm 往返，竞争时还可能等锁），失败仅记日志——
+	// 推理前的 lazy 触发会补（覆盖存量用户与本次空洞），故 eager 失败/慢都不影响注册可靠性。
+	go h.eagerProvisionVKey(user.UUID)
+
 	// 至此校验通过，消费 authz 请求并签发 GW_CODE（与原 Callback 同构，下游零改动）。
 	req, found, err := h.authz.Take(c.Request.Context(), linkedState)
 	if err != nil || !found {
@@ -185,6 +205,16 @@ func (h *LoginHandler) Login(c *gin.Context) {
 	}
 
 	redirectBack(c, req.RedirectURI, url.Values{"code": {gwCode}, "state": {req.OrigState}})
+}
+
+// eagerProvisionVKey 在独立 goroutine 中 best-effort 签发用户 virtual key（ADR-0014 eager）。
+// 用脱离请求生命周期的独立 ctx（请求此时已回包），失败仅记日志由 lazy 兜底。
+func (h *LoginHandler) eagerProvisionVKey(userUUID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), eagerProvisionTimeout)
+	defer cancel()
+	if _, err := h.vkeys.GetOrCreateVirtualKey(ctx, userUUID); err != nil {
+		log.Printf("[vkey] eager 签发失败（不阻断登录，lazy 会补）user=%s: %v", userUUID, err)
+	}
 }
 
 type sendCodeResponse struct {

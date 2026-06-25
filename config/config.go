@@ -68,9 +68,13 @@ type ReleaseEntry struct {
 // LLMConfig LLM 代理（litellm proxy，ADR-0005）转发配置。
 // 网关持有 litellm virtual key，转发时注入 Authorization，桌面端永远拿不到。
 type LLMConfig struct {
-	BaseURL    string        `mapstructure:"base_url"`    // litellm 基址，如 http://127.0.0.1:4000
-	VirtualKey string        `mapstructure:"virtual_key"` // litellm virtual key（VG_LLM_VIRTUAL_KEY 注入；空则不带鉴权头）
-	Timeout    time.Duration `mapstructure:"timeout"`     // 非流式（如 /v1/models）转发超时，默认 30s
+	BaseURL string `mapstructure:"base_url"` // litellm 基址，如 https://litellm-0w6x.srv1477684.hstgr.cloud；必须与 master_key 同实例（ADR-0014）
+	// MasterKey 是 litellm 管理员 key（ADR-0014）：仅 Admin Client 用来签发/删用户 virtual key，永不转发推理。
+	// VG_LLM_MASTER_KEY 注入；prod/staging 必填。空则不带管理鉴权头（dev 本地无鉴权 litellm）。
+	MasterKey string `mapstructure:"master_key"`
+	// VKeyCacheTTL 是用户 virtual key 的 Redis 缓存寿命（热路径，DB 为真相源），默认 1h。
+	VKeyCacheTTL time.Duration `mapstructure:"vkey_cache_ttl"`
+	Timeout      time.Duration `mapstructure:"timeout"` // 非流式（如 /v1/models）转发超时，默认 30s
 	// 以下为流式推理（/v1/chat/completions，#24）双超时（ADR-0008）：
 	StreamIdleTimeout    time.Duration `mapstructure:"stream_idle_timeout"`    // chunk 间空闲上限，默认 120s
 	StreamRequestTimeout time.Duration `mapstructure:"stream_request_timeout"` // 单请求总时长上限，默认 30m
@@ -232,6 +236,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("clawhub.base_url", "http://127.0.0.1:3211/api/v1")
 	v.SetDefault("clawhub.timeout", "10s")
 	v.SetDefault("llm.base_url", "http://127.0.0.1:4000")
+	v.SetDefault("llm.vkey_cache_ttl", "1h")
 	v.SetDefault("llm.timeout", "30s")
 	v.SetDefault("llm.stream_idle_timeout", "120s")
 	v.SetDefault("llm.stream_request_timeout", "30m")
@@ -271,6 +276,10 @@ func (c *Configuration) validate() error {
 	}
 	if c.LLM.Timeout <= 0 {
 		return fmt.Errorf("llm.timeout 必须为正，当前 %s", c.LLM.Timeout)
+	}
+	// litellm Master Key（ADR-0014）：prod/staging 必须经 VG_LLM_MASTER_KEY 注入，否则签发用户 key 全 401。
+	if (c.Env == "prod" || c.Env == "staging") && c.LLM.MasterKey == "" {
+		return fmt.Errorf("llm.master_key 未配置（prod/staging 必填，由 VG_LLM_MASTER_KEY 注入）")
 	}
 	// 生产/预发必须显式注入 RSA 私钥；dev/test 允许留空（启动自生成临时密钥）。
 	if (c.Env == "prod" || c.Env == "staging") && c.Auth.RSAPrivateKeyPEM == "" {

@@ -23,8 +23,8 @@ func TestListModels_ProxiesAndInjectsKey(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := litellm.NewHTTPClient(srv.URL, "secret-vkey", srv.Client())
-	res, err := c.ListModels(context.Background())
+	c := litellm.NewHTTPClient(srv.URL, srv.Client())
+	res, err := c.ListModels(context.Background(), "secret-vkey")
 	if err != nil {
 		t.Fatalf("ListModels 失败: %v", err)
 	}
@@ -52,8 +52,8 @@ func TestListModels_NoKeyNoAuthHeader(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := litellm.NewHTTPClient(srv.URL, "", srv.Client())
-	if _, err := c.ListModels(context.Background()); err != nil {
+	c := litellm.NewHTTPClient(srv.URL, srv.Client())
+	if _, err := c.ListModels(context.Background(), ""); err != nil {
 		t.Fatalf("ListModels 失败: %v", err)
 	}
 	if hadAuth {
@@ -69,8 +69,8 @@ func TestListModels_PassesThroughUpstreamError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := litellm.NewHTTPClient(srv.URL, "", srv.Client())
-	res, err := c.ListModels(context.Background())
+	c := litellm.NewHTTPClient(srv.URL, srv.Client())
+	res, err := c.ListModels(context.Background(), "")
 	if err != nil {
 		t.Fatalf("上游错误不应作为 transport error: %v", err)
 	}
@@ -85,8 +85,8 @@ func TestListModels_TransportFailure(t *testing.T) {
 	url := srv.URL
 	srv.Close()
 
-	c := litellm.NewHTTPClient(url, "", &http.Client{})
-	if _, err := c.ListModels(context.Background()); err == nil {
+	c := litellm.NewHTTPClient(url, &http.Client{})
+	if _, err := c.ListModels(context.Background(), ""); err == nil {
 		t.Fatal("期望传输错误, 实际 nil")
 	}
 }

@@ -11,11 +11,27 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/pysinsjz/vulture-gateway/config"
 )
 
 func withLLM(url string) func(*config.Configuration) {
 	return func(cfg *config.Configuration) { cfg.LLM.BaseURL = url }
+}
+
+// newLLMEngine 装配引擎并预置测试主体（user-llm / u）的 virtual key 缓存为 "test-vkey"（ADR-0014）。
+// router 测试无 postgres：LLM 转发路径靠缓存命中取 key，免触 DB；签发/落库/自愈轮换由 VirtualKeyService 单测覆盖。
+// 转发的桩 litellm 断言收到 Authorization=Bearer test-vkey，即验证「网关按用户注入专属 key」。
+func newLLMEngine(t *testing.T, opts ...func(*config.Configuration)) *gin.Engine {
+	t.Helper()
+	e, mr := newTestEngineWithRedis(t, opts...)
+	for _, sub := range []string{"user-llm", "u"} {
+		if err := mr.Set("vkey:"+sub, "test-vkey"); err != nil {
+			t.Fatalf("预置 vkey 缓存失败: %v", err)
+		}
+	}
+	return e
 }
 
 // assertOpenAIError 断言响应体为 OpenAI 形态 {error:{message,type,code}}。
@@ -59,7 +75,7 @@ func stubLitellm(t *testing.T) (*httptest.Server, *string) {
 // 正路：合法 Bearer → 200 ModelList 透传；成本头剥除、x-litellm-call-id 保留；网关注入 virtual key。
 func TestModels_HappyPath(t *testing.T) {
 	srv, gotAuth := stubLitellm(t)
-	e := newTestEngine(t, withLLM(srv.URL))
+	e := newLLMEngine(t, withLLM(srv.URL))
 	token := issueViaScaffold(t, e, "u", "d")
 
 	rec := do(t, e, http.MethodGet, "/v1/models", token, nil)
@@ -97,7 +113,7 @@ func TestModels_HappyPath(t *testing.T) {
 // 鉴权负路：缺失/非法 token → OpenAI 形态 401，不触达 litellm。
 func TestModels_Unauthorized(t *testing.T) {
 	srv, _ := stubLitellm(t)
-	e := newTestEngine(t, withLLM(srv.URL))
+	e := newLLMEngine(t, withLLM(srv.URL))
 
 	for name, token := range map[string]string{"缺失": "", "垃圾串": "garbage.token"} {
 		t.Run(name, func(t *testing.T) {
@@ -113,7 +129,7 @@ func TestModels_Unauthorized(t *testing.T) {
 // 被吊销 Device（bump token_version 后）→ OpenAI 形态 403 device_revoked。
 func TestModels_RevokedDevice403(t *testing.T) {
 	srv, _ := stubLitellm(t)
-	e := newTestEngine(t, withLLM(srv.URL))
+	e := newLLMEngine(t, withLLM(srv.URL))
 	token := issueViaScaffold(t, e, "user-llm", "dev-llm")
 
 	// 吊销前可用。
@@ -136,7 +152,7 @@ func TestModels_RevokedDevice403(t *testing.T) {
 
 // litellm 不可达 → OpenAI 形态 502。
 func TestModels_UpstreamUnreachable(t *testing.T) {
-	e := newTestEngine(t, withLLM("http://127.0.0.1:1"))
+	e := newLLMEngine(t, withLLM("http://127.0.0.1:1"))
 	token := issueViaScaffold(t, e, "u", "d")
 
 	rec := do(t, e, http.MethodGet, "/v1/models", token, nil)
@@ -182,7 +198,7 @@ func TestChatCompletions_StreamingPassthroughAndInjectsUsage(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	e := newTestEngine(t, withLLM(srv.URL))
+	e := newLLMEngine(t, withLLM(srv.URL))
 	token := issueViaScaffold(t, e, "user-llm", "dev-llm")
 
 	rec := do(t, e, http.MethodPost, "/v1/chat/completions", token, map[string]any{
@@ -233,7 +249,7 @@ func TestChatCompletions_NonStreamingJSON(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	e := newTestEngine(t, withLLM(srv.URL))
+	e := newLLMEngine(t, withLLM(srv.URL))
 	token := issueViaScaffold(t, e, "user-llm", "dev-llm")
 
 	rec := do(t, e, http.MethodPost, "/v1/chat/completions", token, map[string]any{
@@ -264,7 +280,7 @@ func TestChatCompletions_MissingUsageChunkTolerated(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	e := newTestEngine(t, withLLM(srv.URL))
+	e := newLLMEngine(t, withLLM(srv.URL))
 	token := issueViaScaffold(t, e, "user-llm", "dev-llm")
 
 	rec := do(t, e, http.MethodPost, "/v1/chat/completions", token, map[string]any{
@@ -289,7 +305,7 @@ func TestChatCompletions_UpstreamErrorPassthrough(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	e := newTestEngine(t, withLLM(srv.URL))
+	e := newLLMEngine(t, withLLM(srv.URL))
 	token := issueViaScaffold(t, e, "user-llm", "dev-llm")
 
 	rec := do(t, e, http.MethodPost, "/v1/chat/completions", token, map[string]any{
@@ -314,7 +330,7 @@ func TestChatCompletions_IdleTimeoutAbortsStream(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	e := newTestEngine(t, withLLMIdle(srv.URL, 80*time.Millisecond))
+	e := newLLMEngine(t, withLLMIdle(srv.URL, 80*time.Millisecond))
 	token := issueViaScaffold(t, e, "user-llm", "dev-llm")
 
 	rec := do(t, e, http.MethodPost, "/v1/chat/completions", token, map[string]any{
@@ -375,7 +391,7 @@ func stubChatJSON(t *testing.T) (*httptest.Server, *int32) {
 // 无活跃订阅 → 402 no_active_subscription，且请求不转发到 litellm（订阅先于转发）。
 func TestChatCompletions_NoSubscription402NotForwarded(t *testing.T) {
 	srv, hits := stubChatJSON(t)
-	e := newTestEngine(t, withLLMNoSub(srv.URL))
+	e := newLLMEngine(t, withLLMNoSub(srv.URL))
 	token := issueViaScaffold(t, e, "user-llm", "dev-llm")
 
 	rec := do(t, e, http.MethodPost, "/v1/chat/completions", token, map[string]any{
@@ -397,7 +413,7 @@ func TestChatCompletions_RequestTooLarge413(t *testing.T) {
 		"model": "gpt-4", "messages": []map[string]string{{"role": "user", "content": "hello world"}}, "stream": false,
 	}
 	raw, _ := json.Marshal(bodyMap)
-	e := newTestEngine(t, withLLMMaxBytes(srv.URL, int64(len(raw))-1)) // 上限比实际小 1 字节
+	e := newLLMEngine(t, withLLMMaxBytes(srv.URL, int64(len(raw))-1)) // 上限比实际小 1 字节
 	token := issueViaScaffold(t, e, "user-llm", "dev-llm")
 
 	rec := do(t, e, http.MethodPost, "/v1/chat/completions", token, bodyMap)
@@ -417,7 +433,7 @@ func TestChatCompletions_ExactlyAtLimitAllowed(t *testing.T) {
 		"model": "gpt-4", "messages": []map[string]string{{"role": "user", "content": "hello world"}}, "stream": false,
 	}
 	raw, _ := json.Marshal(bodyMap)
-	e := newTestEngine(t, withLLMMaxBytes(srv.URL, int64(len(raw)))) // 恰好等于实际体积
+	e := newLLMEngine(t, withLLMMaxBytes(srv.URL, int64(len(raw)))) // 恰好等于实际体积
 	token := issueViaScaffold(t, e, "user-llm", "dev-llm")
 
 	rec := do(t, e, http.MethodPost, "/v1/chat/completions", token, bodyMap)
@@ -436,7 +452,7 @@ func TestChatCompletions_SubscriptionBeatsTooLarge(t *testing.T) {
 		"model": "gpt-4", "messages": []map[string]string{{"role": "user", "content": "hello world"}},
 	}
 	raw, _ := json.Marshal(bodyMap)
-	e := newTestEngine(t, func(cfg *config.Configuration) {
+	e := newLLMEngine(t, func(cfg *config.Configuration) {
 		cfg.LLM.BaseURL = srv.URL
 		cfg.LLM.StubNoSubscription = true             // 无订阅
 		cfg.LLM.MaxRequestBytes = int64(len(raw)) - 1 // 且超限
@@ -474,7 +490,7 @@ func chatReq() map[string]any {
 // 乐观放行 + 触顶 429：首请求扣满 Cap（单请求可超窗），次请求触顶 429 + 恢复头，且不转发。
 func TestChatCompletions_WindowExceeded429(t *testing.T) {
 	srv, hits := stubChatJSON(t) // 每次 usage=prompt2+completion1 → 3 Credit
-	e := newTestEngine(t, withLLM5hCap(srv.URL, 3))
+	e := newLLMEngine(t, withLLM5hCap(srv.URL, 3))
 	token := issueViaScaffold(t, e, "user-llm", "dev-llm")
 
 	// 首请求：空窗乐观放行（即便本次扣 3 = Cap）。
@@ -506,7 +522,7 @@ func TestChatCompletions_WindowExceeded429(t *testing.T) {
 // 错误体可区分：网关触顶 code=usage_window_exceeded / type=rate_limit_error（区别于上游透传限流）。
 func TestChatCompletions_GatewayRateLimitDistinct(t *testing.T) {
 	srv, _ := stubChatJSON(t)
-	e := newTestEngine(t, withLLM5hCap(srv.URL, 3))
+	e := newLLMEngine(t, withLLM5hCap(srv.URL, 3))
 	token := issueViaScaffold(t, e, "user-llm", "dev-llm")
 	_ = do(t, e, http.MethodPost, "/v1/chat/completions", token, chatReq()) // 填满
 	rec := do(t, e, http.MethodPost, "/v1/chat/completions", token, chatReq())
@@ -531,7 +547,7 @@ func TestChatCompletions_MissingUsageEstimatedDebit(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	e := newTestEngine(t, withLLM5hCap(srv.URL, 1)) // Cap 极小，任何估算扣减都将触顶
+	e := newLLMEngine(t, withLLM5hCap(srv.URL, 1)) // Cap 极小，任何估算扣减都将触顶
 	token := issueViaScaffold(t, e, "user-llm", "dev-llm")
 
 	body := map[string]any{"model": "gpt-4", "messages": []map[string]string{{"role": "user", "content": "hi"}}, "stream": true}
@@ -562,7 +578,7 @@ func TestChatCompletions_HardErrorZeroBill(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	e := newTestEngine(t, withLLM5hCap(srv.URL, 1)) // Cap=1：若 400 误扣费，次请求将 429
+	e := newLLMEngine(t, withLLM5hCap(srv.URL, 1)) // Cap=1：若 400 误扣费，次请求将 429
 	token := issueViaScaffold(t, e, "user-llm", "dev-llm")
 
 	if rec := do(t, e, http.MethodPost, "/v1/chat/completions", token, chatReq()); rec.Code != http.StatusBadRequest {
@@ -579,7 +595,7 @@ func TestChatCompletions_HardErrorZeroBill(t *testing.T) {
 func TestChatCompletions_ConcurrentDebitsAtomic(t *testing.T) {
 	const n = 12
 	srv, _ := stubChatJSON(t) // 每次 3 Credit
-	e := newTestEngine(t, withLLM5hCap(srv.URL, n*3))
+	e := newLLMEngine(t, withLLM5hCap(srv.URL, n*3))
 	token := issueViaScaffold(t, e, "user-llm", "dev-llm")
 
 	var wg sync.WaitGroup

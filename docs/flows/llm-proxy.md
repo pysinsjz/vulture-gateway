@@ -8,8 +8,8 @@
 桌面端 (OpenAI SDK, base_url=网关)
    │ Bearer <网关 access JWT>
    ▼
-网关  ── 鉴权(JWT+Device) → 窗口预检 → 注入 usage 选项 → 转发
-   │ Bearer <litellm virtual key>（网关持有，桌面端不可见）
+网关  ── 鉴权(JWT+Device) → 窗口预检 → 注入 usage 选项 → 解析用户 virtual key → 转发
+   │ Bearer <该用户专属 litellm virtual key>（网关按用户签发/持有，桌面端不可见；ADR-0014）
    ▼
 litellm proxy ──→ 各模型供应商
 ```
@@ -19,7 +19,7 @@ litellm proxy ──→ 各模型供应商
 ## 1. 对接约定
 
 - **端点**：`POST /v1/chat/completions`（推理）、`GET /v1/models`（模型列表）。后续可按需开 `/v1/embeddings` 等，同样代理形态。全局约定见 [api-conventions.md](./api-conventions.md)。
-- **鉴权**：`Authorization: Bearer <网关 access JWT>`（同其他 API，见 auth.md）。网关换成自己持有的 litellm key 转发——**桌面端永远拿不到 litellm key**。
+- **鉴权**：`Authorization: Bearer <网关 access JWT>`（同其他 API，见 auth.md）。网关换成**该用户专属的** litellm virtual key 转发（按用户 1:1 签发，归因 + 纵深防御保险丝，限额权威仍在网关窗口；ADR-0014）——**桌面端永远拿不到 litellm key**。库里 key 被 litellm 拒（401/403）时网关一次性自愈轮换并重试。
 - **协议**：请求/响应体为 OpenAI 格式；流式为 SSE（`data: {...}\n\n`，终止 `data: [DONE]`）；多模态走标准 message content（image_url/base64）。
 - **请求体上限**：整体请求体（含多模态 base64）≤ **25MB**；超限 ⇒ `413` + OpenAI 错误体 `code:"request_too_large"`。当前上限经 bootstrap 的 `max_upload_mb` flag 广播，桌面端可预检。
 - **流式超时**：网关 chunk 间空闲 > **120s** 或单请求总时长 > **30min** ⇒ 中断（按已生成部分计费，ADR-0008）。桌面端 SSE 读超时建议 **≥130s**（略大于网关空闲，避免客户端先放弃）。
@@ -66,7 +66,7 @@ sequenceDiagram
     Note over G: 鉴权: JWT 签名 + token_version(Redis)
     Note over G: 订阅检查: 无有效 Subscription→402（见 §4b）
     Note over G: 预检: 5h 窗 & 周窗（任一已触顶→429, 见 §4）
-    Note over G: 注入 stream_options.include_usage=true<br/>替换为 litellm key 转发
+    Note over G: 注入 stream_options.include_usage=true<br/>解析用户 virtual key 后转发
     G->>L: 转发请求
     L->>P: 路由到供应商
     P-->>L: 流式 token

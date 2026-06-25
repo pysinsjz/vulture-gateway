@@ -26,6 +26,13 @@ oauth:
   gw_code_ttl: "60s"
   authz_ttl: "10m"
 
+# LLM 代理（litellm proxy，ADR-0005/0014）：base_url 切到新实例，必须与 master_key 同实例否则签发全 401。
+# master_key 留空，强制由 VG_LLM_MASTER_KEY 注入（validate 拒绝空值）。
+llm:
+  base_url: "https://litellm-0w6x.srv1477684.hstgr.cloud"
+  master_key: ""
+  vkey_cache_ttl: "1h"
+
 # 预发关闭脚手架签发端点。
 scaffold:
   enabled: false

@@ -28,6 +28,13 @@ import (
 )
 
 // fakeIdentityRepo 内存身份仓（登录页测试用）。
+// noopVKeyProvisioner 是 ADR-0014 eager 签发的测试假实现：登录流程不依赖真实 litellm。
+type noopVKeyProvisioner struct{}
+
+func (noopVKeyProvisioner) GetOrCreateVirtualKey(_ context.Context, _ string) (string, error) {
+	return "sk-test", nil
+}
+
 type fakeIdentityRepo struct {
 	byKey map[string]*model.Identity
 }
@@ -103,7 +110,7 @@ func newLoginFixture(t *testing.T) *loginFixture {
 		model.ProviderCategoryEmail: notify.NewStubSender("email"),
 	})
 
-	h := handler.NewLoginHandler(registry, otpSvc, authzStore, gwStore, users, rsaDec, csrfStore)
+	h := handler.NewLoginHandler(registry, otpSvc, authzStore, gwStore, users, noopVKeyProvisioner{}, rsaDec, csrfStore)
 
 	r := gin.New()
 	r.GET("/oauth/login", h.LoginPage)

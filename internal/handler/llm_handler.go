@@ -53,7 +53,8 @@ func NewLLMHandler(svc *service.LLMService, sub service.SubscriptionChecker, met
 //
 //	GET /v1/models  (Bearer)
 func (h *LLMHandler) ListModels(c *gin.Context) {
-	res, err := h.svc.ListModels(c.Request.Context())
+	userUUID := c.GetString(middleware.CtxKeySub)
+	res, err := h.svc.ListModels(c.Request.Context(), userUUID)
 	if err != nil {
 		// litellm 不可达：网关自身错误也用 OpenAI 形态（503/上游不可用）。
 		apierror.AbortOpenAI(c, http.StatusBadGateway, apierror.OpenAITypeInvalidRequest, "upstream_unavailable", "模型服务暂时不可用")
@@ -111,7 +112,7 @@ func (h *LLMHandler) ChatCompletions(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), h.requestTimeout)
 	defer cancel()
 
-	res, err := h.svc.ChatCompletions(ctx, body)
+	res, err := h.forwardChat(ctx, userUUID, body)
 	if err != nil {
 		apierror.AbortOpenAI(c, http.StatusBadGateway, apierror.OpenAITypeInvalidRequest, "upstream_unavailable", "模型服务暂时不可用")
 		return
@@ -149,6 +150,28 @@ func (h *LLMHandler) ChatCompletions(c *gin.Context) {
 	// 超时/断流：已写部分即止（头已发，无法改写状态）；按已生成部分计费（usage 缺失则估算）。
 	_ = litellm.PumpStream(ctx, sniffer, flush, res.Body, h.idleTimeout)
 	h.recordUsage(userUUID, body, sniffer.Usage(), sniffer.CompletionChars())
+}
+
+// forwardChat 转发 chat 请求并做一次性自愈轮换（ADR-0014 失败处理 ②）：
+// 上游返 401/403（库里 key 被 litellm 拒，如手工删 key）→ 轮换重签 + 用新 key 重试一次（仅一次防死循环）。
+// 此时流式响应体尚未开写（handler 后续才泵流），无部分写入风险。轮换失败则原样返回 401/403 让上层透传。
+func (h *LLMHandler) forwardChat(ctx context.Context, userUUID string, body []byte) (*litellm.ChatResponse, error) {
+	res, err := h.svc.ChatCompletions(ctx, userUUID, body)
+	if err != nil {
+		return nil, err
+	}
+	if res.Status != http.StatusUnauthorized && res.Status != http.StatusForbidden {
+		return res, nil
+	}
+	if healErr := h.svc.RegenerateVirtualKey(ctx, userUUID); healErr != nil {
+		return res, nil // 轮换失败：原样返回，上层透传上游错误体
+	}
+	_ = res.Body.Close() // 轮换成功：丢弃旧响应体，用新 key 重试一次
+	retry, err := h.svc.ChatCompletions(ctx, userUUID, body)
+	if err != nil {
+		return nil, err
+	}
+	return retry, nil
 }
 
 // recordUsage 在转发结束后扣减用量：优先用上游 usage，缺失时按 prompt/输出字符数估算兜底（#26）。

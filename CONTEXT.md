@@ -72,6 +72,10 @@ _Avoid_: membership, recharge
 The per-model rule that converts raw LLM usage (input/output tokens and multimodal units) into Credit, including the markup over the upstream provider's cost. It is how usage becomes a Billable Event amount.
 _Avoid_: rate, tariff, cost
 
+**User Virtual Key**:
+The per-User upstream credential the Gateway mints (one active key per User, 1:1) and injects when forwarding that User's LLM calls. Its purpose is per-User attribution and a defense-in-depth budget backstop — the Gateway's Usage Windows remain the authoritative cap, not this key (ADR-0014). Distinct from the Master Key, which the Gateway uses only to mint/revoke User Virtual Keys and never forwards inference with.
+_Avoid_: api key, token, user key, litellm key (unqualified)
+
 ### Marketplaces
 
 **Skill Hub**:

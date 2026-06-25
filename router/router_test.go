@@ -23,6 +23,14 @@ const testSecret = "contract-test-secret"
 // opts 可在装配前微调配置（如把 ClawHub 基址指向 httptest 桩，见 plugin_test.go）。
 func newTestEngine(t *testing.T, opts ...func(*config.Configuration)) *gin.Engine {
 	t.Helper()
+	e, _ := newTestEngineWithRedis(t, opts...)
+	return e
+}
+
+// newTestEngineWithRedis 同 newTestEngine，但额外返回底层 miniredis，供需直接预置缓存的用例使用
+// （如 ADR-0014：LLM 测试预置 user→virtual key 缓存，令转发命中缓存而免触无 postgres 的 DB）。
+func newTestEngineWithRedis(t *testing.T, opts ...func(*config.Configuration)) (*gin.Engine, *miniredis.Miniredis) {
+	t.Helper()
 	mr, err := miniredis.Run()
 	if err != nil {
 		t.Fatalf("启动 miniredis 失败: %v", err)
@@ -43,7 +51,7 @@ func newTestEngine(t *testing.T, opts ...func(*config.Configuration)) *gin.Engin
 		},
 		// 默认指向不可达基址；未调 /plugins、/v1 的用例不会触达。需正路的用例用 opts 覆盖为桩 URL。
 		ClawHub:  config.ClawHubConfig{BaseURL: "http://127.0.0.1:1", Timeout: 5 * time.Second},
-		LLM:      config.LLMConfig{BaseURL: "http://127.0.0.1:1", VirtualKey: "test-vkey", Timeout: 5 * time.Second},
+		LLM:      config.LLMConfig{BaseURL: "http://127.0.0.1:1", MasterKey: "test-master", Timeout: 5 * time.Second},
 		Scaffold: config.ScaffoldConfig{Enabled: true},
 	}
 	for _, o := range opts {
@@ -53,7 +61,7 @@ func newTestEngine(t *testing.T, opts ...func(*config.Configuration)) *gin.Engin
 	if err != nil {
 		t.Fatalf("WireApp 失败: %v", err)
 	}
-	return app.Engine
+	return app.Engine, mr
 }
 
 // signToken 用测试密钥直接签发一枚 access JWT，便于构造过期/异签等边界 token。
