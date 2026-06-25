@@ -4,9 +4,13 @@ package db
 import (
 	"context"
 	"fmt"
+	"log"
+	"os"
+	"time"
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 
 	"github.com/pysinsjz/vulture-gateway/config"
 	"github.com/pysinsjz/vulture-gateway/internal/model"
@@ -17,11 +21,29 @@ import (
 func NewPostgres(cfg config.PostgresConfig) (*gorm.DB, error) {
 	gdb, err := gorm.Open(postgres.Open(cfg.DSN), &gorm.Config{
 		DisableAutomaticPing: true,
+		Logger:               newGormLogger(),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("打开 PostgreSQL 连接失败: %w", err)
 	}
 	return gdb, nil
+}
+
+// newGormLogger 构造 GORM 日志器：
+//   - IgnoreRecordNotFoundError：record-not-found 是正常控制流（如 GetOrCreateVirtualKey 首签前查无、
+//     ResolveOrCreateBySubject 查无即建），DAO 已用 errors.Is 处理，不应被当作错误日志打印（误导排障）。
+//   - Colorful=false：容器日志无终端，ANSI 红色转义反而像报错。
+//   - SlowThreshold：仍保留慢查询告警（>200ms）。
+func newGormLogger() logger.Interface {
+	return logger.New(
+		log.New(os.Stdout, "", log.LstdFlags),
+		logger.Config{
+			SlowThreshold:             200 * time.Millisecond,
+			LogLevel:                  logger.Warn,
+			IgnoreRecordNotFoundError: true,
+			Colorful:                  false,
+		},
+	)
 }
 
 // Ping 校验数据库连通性。
