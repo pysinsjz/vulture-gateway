@@ -193,9 +193,19 @@ func (s *VirtualKeyService) persistFirst(ctx context.Context, userUUID string, g
 }
 
 func (s *VirtualKeyService) sign(ctx context.Context, userUUID string) (*litellm.GeneratedKey, error) {
+	// 签发时动态拉 litellm 当前全部模型，显式写进 key（ADR-0014 修订：不留空＝避免 "All Proxy Models" 通配）。
+	// 拉取失败或清单为空一律拒签——绝不退回全开 key（宁可本次失败，由 lazy 重试）。
+	models, err := s.admin.ListModelIDs(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("拉取 litellm 模型清单失败（拒绝签发全开 key）: %w", err)
+	}
+	if len(models) == 0 {
+		return nil, fmt.Errorf("litellm 模型清单为空，拒绝签发全开 key user=%s", userUUID)
+	}
 	gen, err := s.admin.GenerateKey(ctx, litellm.GenerateKeyParams{
 		KeyAlias:  vkeyAlias(userUUID),
 		UserID:    userUUID,
+		Models:    models,
 		MaxBudget: vkeyMaxBudgetFuse,
 	})
 	if err != nil {

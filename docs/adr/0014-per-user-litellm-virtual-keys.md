@@ -22,7 +22,9 @@ ADR-0005 让 litellm 退化为「上游模型路由器 + 供应商 key 持有方
 
 - **防双签 + 防孤儿。** 签 key 是对 litellm 的外部副作用、不在 DB 事务内，并发首签会签出孤儿 key。三重防护：① Redis 分布式锁（`lock:vkey:{uuid}`，秒级过期）圈住整个 get-or-create；② DB `user_uuid` 唯一约束兜底；③ 万一插入仍冲突，把刚签出的 key 调 litellm `/key/delete` 删掉。
 
-- **签发参数。** `key_alias=user-{uuid}`、`user_id={uuid}`（end-user 归因）、`models` 留空＝全部（模型访问控制是网关/套餐职责，不靠 key）、`duration` 不设（永久，生命周期由网关管）、`rpm_limit` 不设（网关侧无 rpm 概念，加了反成一处不一致）。**保险丝 `max_budget=9999999` 且不带 `budget_duration`**——管道铺好但**数值故意大到永不触发，B 当前挂空**；保险丝的真实数值依赖套餐定价，而定价文档仍 park（见 memory），**待定价落地后重算**，届时再决定是否加 `budget_duration` 让熔断自动重置。
+- **签发参数。** `key_alias=user-{uuid}`、`user_id={uuid}`（end-user 归因）、`models`＝**签发时动态拉 litellm 当前全部模型 id 显式写入**（见下「修订」）、`duration` 不设（永久，生命周期由网关管）、`rpm_limit` 不设（网关侧无 rpm 概念，加了反成一处不一致）。**保险丝 `max_budget=9999999` 且不带 `budget_duration`**——管道铺好但**数值故意大到永不触发，B 当前挂空**；保险丝的真实数值依赖套餐定价，而定价文档仍 park（见 memory），**待定价落地后重算**，届时再决定是否加 `budget_duration` 让熔断自动重置。
+
+  **【修订 2026-06-25】`models` 不再留空＝全部。** 原决策让 key 留空 models（litellm 渲染为 "All Proxy Models" 通配，把模型访问控制全交给网关/套餐层）。实测发现这会让每把用户 key 在 litellm 后台都是通配全开、不可审计具体模型，遂改为：**签发前网关用 Master Key 调 litellm `GET /v1/models` 拉当前全部模型 id，显式逐个写进 key 的 `models`**。语义仍是「当前全部模型」（自动跟随 litellm 新增/下线，无需手工维护清单），但 key 上是**显式枚举**而非通配，后台可审计、可为将来按套餐裁剪留口。**拉取失败或清单为空一律拒签**（返错由 lazy 重试），**绝不退回全开 key**——宁可本次签发失败也不发出通配 key。模型访问控制的「网关/套餐职责」定位不变，此修订只改 key 上的表达形式。
 
 - **请求链路：Admin / Proxy 双客户端 + service 层解析 + Redis 缓存。** 拆出 **Admin Client**（持 Master Key，做 `Generate/Delete/Update`）与改造后的 **Proxy Client**（`ChatCompletions`/`ListModels` 方法签名加 key 参，去掉构造期单 key）。key 解析收敛在 service 层：handler 多传 `userUUID` → service `GetOrCreate` → Proxy Client 注入。热路径加 Redis 缓存（`vkey:{uuid}`→key，带 TTL），DB 为真相源、缓存失效回查。`/v1/models` 同样走用户 key。**现有门禁（订阅 402 / 体积 413 / 窗口预检 429）与计量逻辑一行不改，本次只替换 key 注入。**
 

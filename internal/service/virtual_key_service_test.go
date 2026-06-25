@@ -83,6 +83,9 @@ type fakeAdmin struct {
 	nextKey    string
 	failGen    bool
 	keyCounter int
+	models     []string // ListModelIDs 返回；nil 时默认给一份非空清单
+	listFails  bool
+	lastModels []string // 记录最后一次 GenerateKey 收到的 Models
 }
 
 func newFakeAdmin() *fakeAdmin { return &fakeAdmin{} }
@@ -91,6 +94,7 @@ func (a *fakeAdmin) GenerateKey(_ context.Context, p litellm.GenerateKeyParams) 
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.genCalls++
+	a.lastModels = p.Models
 	if a.failGen {
 		return nil, errors.New("litellm 不可达")
 	}
@@ -100,6 +104,18 @@ func (a *fakeAdmin) GenerateKey(_ context.Context, p litellm.GenerateKeyParams) 
 		key = "sk-gen-" + p.UserID
 	}
 	return &litellm.GeneratedKey{Key: key, TokenID: "tok"}, nil
+}
+
+func (a *fakeAdmin) ListModelIDs(_ context.Context) ([]string, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.listFails {
+		return nil, errors.New("litellm /v1/models 不可达")
+	}
+	if a.models != nil {
+		return a.models, nil
+	}
+	return []string{"m1", "m2"}, nil // 默认非空，令签发路径可走通
 }
 
 func (a *fakeAdmin) DeleteKey(_ context.Context, key string) error {
@@ -204,6 +220,48 @@ func TestGetOrCreate_FirstSign(t *testing.T) {
 	}
 	if v, _, _ := cache.Get(context.Background(), "u1"); v != "sk-gen-u1" {
 		t.Errorf("应回填缓存")
+	}
+}
+
+// 首签把 litellm 当前模型清单显式写进 key（ADR-0014 修订：不留空＝避免 All Proxy Models 通配）。
+func TestGetOrCreate_SignCarriesModelList(t *testing.T) {
+	svc, _, admin, _ := newSvc()
+	admin.models = []string{"qwen3.7-plus", "deepseek/deepseek-v4-pro"}
+
+	if _, err := svc.GetOrCreateVirtualKey(context.Background(), "u1"); err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	if len(admin.lastModels) != 2 || admin.lastModels[0] != "qwen3.7-plus" {
+		t.Errorf("签发应带显式模型清单, 实际 %+v", admin.lastModels)
+	}
+}
+
+// 模型清单拉取失败 → 拒签（不退回全开 key），不落库。
+func TestGetOrCreate_ModelListFailureRefusesSign(t *testing.T) {
+	svc, repo, admin, _ := newSvc()
+	admin.listFails = true
+
+	if _, err := svc.GetOrCreateVirtualKey(context.Background(), "u1"); err == nil {
+		t.Fatal("模型清单拉取失败应拒签")
+	}
+	if admin.genCalls != 0 {
+		t.Errorf("拉取失败不应调 GenerateKey")
+	}
+	if repo.rows["u1"] != nil {
+		t.Errorf("拒签不应落库")
+	}
+}
+
+// 模型清单为空 → 拒签（避免 litellm 视空数组为全开/无权的歧义）。
+func TestGetOrCreate_EmptyModelListRefusesSign(t *testing.T) {
+	svc, _, admin, _ := newSvc()
+	admin.models = []string{} // 非 nil 的空清单
+
+	if _, err := svc.GetOrCreateVirtualKey(context.Background(), "u1"); err == nil {
+		t.Fatal("模型清单为空应拒签")
+	}
+	if admin.genCalls != 0 {
+		t.Errorf("清单为空不应调 GenerateKey")
 	}
 }
 
