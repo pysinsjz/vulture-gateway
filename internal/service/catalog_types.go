@@ -18,6 +18,75 @@ type Category struct {
 	Label string `json:"label"`
 }
 
+// CategoryCount 是分类端点的对外项：分类 id/label + 该分类下可见制品数（§3.1b）。
+type CategoryCount struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
+	Count int    `json:"count"`
+}
+
+// CategoriesResponse 是分类端点（/skills/categories、/plugins/categories）的对外契约（§3.1b）。
+type CategoriesResponse struct {
+	Categories []CategoryCount `json:"categories"`
+}
+
+const (
+	// uncategorizedID/uncategorizedLabel 是「未指定分类」可见制品的归并桶。
+	// 契约约定未分类制品归「其他」（skill-plugin-lifecycle.md §3.1b）；派生口径下 category==nil
+	// 即落此桶，且永远排在末位。
+	uncategorizedID    = "other"
+	uncategorizedLabel = "其他"
+
+	// categoriesPageSize 是派生聚合翻页时下发的单页条数；
+	// categoriesMaxPages 是翻页安全上限（防游标环 / 上游异常导致死循环）。
+	categoriesPageSize = 100
+	categoriesMaxPages = 1000
+)
+
+// categoryAggregator 累计「分类 → 可见制品数」，保持分类的首次出现顺序，
+// category==nil 的可见制品归入末位「其他」桶。
+//
+// 派生口径的已知偏差（§3.1b「网关派生」分支）：
+//   - 顺序为首现序（列表默认排序决定），非运营定义序；
+//   - 0 可见制品的分类不会出现（派生只见列表里实际出现过的分类）。
+//
+// 目标态由 ClawHub fork 原生分类端点取代（见 docs/flows/clawhub-gateway-contract.md）。
+type categoryAggregator struct {
+	order      []string          // 首现顺序的分类 id
+	labels     map[string]string // id → label（同 id 以首现 label 为准）
+	counts     map[string]int    // id → 可见制品数
+	uncatCount int               // 未分类（category==nil）可见制品数
+}
+
+func newCategoryAggregator() *categoryAggregator {
+	return &categoryAggregator{labels: map[string]string{}, counts: map[string]int{}}
+}
+
+// add 累计一个可见制品的分类。调用方负责仅传入「通过兼容过滤」的制品。
+func (a *categoryAggregator) add(cat *Category) {
+	if cat == nil {
+		a.uncatCount++
+		return
+	}
+	if _, seen := a.counts[cat.ID]; !seen {
+		a.order = append(a.order, cat.ID)
+		a.labels[cat.ID] = cat.Label
+	}
+	a.counts[cat.ID]++
+}
+
+// result 按首现序输出分类计数；末位追加「其他」桶（仅当存在未分类可见制品）。
+func (a *categoryAggregator) result() CategoriesResponse {
+	cats := make([]CategoryCount, 0, len(a.order)+1)
+	for _, id := range a.order {
+		cats = append(cats, CategoryCount{ID: id, Label: a.labels[id], Count: a.counts[id]})
+	}
+	if a.uncatCount > 0 {
+		cats = append(cats, CategoryCount{ID: uncategorizedID, Label: uncategorizedLabel, Count: a.uncatCount})
+	}
+	return CategoriesResponse{Categories: cats}
+}
+
 // PageParams 是纯游标分页参数（版本历史等列表用）。
 type PageParams struct {
 	Limit  int

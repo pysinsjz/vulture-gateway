@@ -87,6 +87,20 @@ type PackageVersionSummary struct {
 	Changelog string `json:"changelog"`
 }
 
+// PackageReleasePage 是 plugin 版本历史分页。
+type PackageReleasePage struct {
+	Items      []PackageReleaseHistory `json:"items"`
+	NextCursor *string                 `json:"nextCursor"`
+}
+
+// PackageReleaseHistory 是 plugin 版本历史列表项（§3.2 PluginVersionHistory）。
+type PackageReleaseHistory struct {
+	Version   string   `json:"version"`
+	CreatedAt int64    `json:"createdAt"`
+	Changelog string   `json:"changelog"`
+	DistTags  []string `json:"distTags,omitempty"`
+}
+
 // PackageReleaseDetail 是 ClawHub GET /packages/{name}/releases/{version} 的原始版本详情。
 type PackageReleaseDetail struct {
 	Package PackageReleasePkg `json:"package"`
@@ -153,6 +167,20 @@ func (c *httpClient) GetPackageRelease(ctx context.Context, name, version string
 		return nil, err
 	}
 	return &detail, nil
+}
+
+func (c *httpClient) ListPackageReleases(ctx context.Context, name string, page PageParams) (*PackageReleasePage, error) {
+	q := url.Values{}
+	if page.Limit > 0 {
+		q.Set("limit", strconv.Itoa(page.Limit))
+	}
+	setIfNotEmpty(q, "cursor", page.Cursor)
+
+	var out PackageReleasePage
+	if err := c.get(ctx, "/packages/"+url.PathEscape(name)+"/versions", q, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 func (c *httpClient) PackageDownloadStreamURL(name, version string) string {

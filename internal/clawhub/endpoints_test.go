@@ -58,6 +58,31 @@ func TestGetPackage_ParsesDetail(t *testing.T) {
 	}
 }
 
+func TestListPackageReleases_ParsesPaging(t *testing.T) {
+	stub := newMuxStub(t, map[string]func() (int, string){
+		"/packages/@v/x/versions": func() (int, string) {
+			return http.StatusOK, `{"items":[{"version":"0.1.0","createdAt":100,"changelog":"init","distTags":["latest"]},{"version":"0.0.9","createdAt":50,"changelog":"preview"}],"nextCursor":"cur-2"}`
+		},
+	})
+	c := clawhub.NewHTTPClient(stub.srv.URL, stub.srv.Client())
+
+	page, err := c.ListPackageReleases(context.Background(), "@v/x", clawhub.PageParams{Limit: 25, Cursor: "cur-1"})
+	if err != nil {
+		t.Fatalf("ListPackageReleases 失败: %v", err)
+	}
+	if !strings.Contains(stub.lastRaw, "limit=25") || !strings.Contains(stub.lastRaw, "cursor=cur-1") {
+		t.Errorf("分页参数未下发: %q", stub.lastRaw)
+	}
+	if len(page.Items) != 2 || page.Items[0].Version != "0.1.0" ||
+		page.Items[0].CreatedAt != 100 || page.Items[0].Changelog != "init" ||
+		len(page.Items[0].DistTags) != 1 || page.Items[0].DistTags[0] != "latest" {
+		t.Errorf("版本历史解析错误: %+v", page.Items)
+	}
+	if page.NextCursor == nil || *page.NextCursor != "cur-2" {
+		t.Errorf("游标解析错误: %+v", page.NextCursor)
+	}
+}
+
 func TestGetSkillVersion_ParsesArtifact(t *testing.T) {
 	stub := newMuxStub(t, map[string]func() (int, string){
 		"/skills/gifgrep/versions/1.2.0": func() (int, string) {

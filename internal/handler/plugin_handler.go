@@ -49,6 +49,19 @@ func (h *PluginHandler) ListPlugins(c *gin.Context) {
 	c.JSON(http.StatusOK, page)
 }
 
+// PluginCategories 返回 plugin 浏览分类 + 计数（驱动桌面端分组标题与计数，§3.1b）。
+// 网关派生：聚合全量 /packages 列表，按 X-Platform/X-App-Version 兼容过滤后按 pluginCategory 计数。
+//
+//	GET /api/v1/plugins/categories  (Bearer)
+func (h *PluginHandler) PluginCategories(c *gin.Context) {
+	res, err := h.svc.PluginCategories(c.Request.Context(), compatFromHeaders(c))
+	if err != nil {
+		writeClawHubError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, res)
+}
+
 // GetPlugin 返回 plugin 详情（含 latestVersion，升级比较用）。
 //
 //	GET /api/v1/plugins/{name}  (Bearer)
@@ -59,6 +72,26 @@ func (h *PluginHandler) GetPlugin(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, detail)
+}
+
+// ListPluginVersions 返回 plugin 版本历史（游标分页）。
+//
+//	GET /api/v1/plugins/{name}/versions?limit=&cursor=  (Bearer)
+func (h *PluginHandler) ListPluginVersions(c *gin.Context) {
+	limit, ok := parseLimit(c)
+	if !ok {
+		return
+	}
+	page, err := h.svc.ListPluginVersions(
+		c.Request.Context(),
+		c.Param("name"),
+		service.PageParams{Limit: limit, Cursor: c.Query("cursor")},
+	)
+	if err != nil {
+		writeClawHubError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, page)
 }
 
 // GetPluginVersion 返回 plugin 指定版本详情（含 artifact.sha256）。

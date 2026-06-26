@@ -183,6 +183,22 @@
 }
 ```
 
+### 2.3a `GET /packages/{name}/versions` — plugin 版本历史（游标分页）
+
+**Query**：`limit`(int) · `cursor`(string)
+
+**Response 200**：
+```jsonc
+{
+  "items": [
+    { "version": "string", "createdAt": 0, "changelog": "string", "distTags": ["string"]? }
+  ],
+  "nextCursor": "string" | null
+}
+```
+
+网关 `/api/v1/plugins/{name}/versions` 1:1 反代此端点；翻译只透传字段。
+
 ### 2.3 `GET /packages/{name}/releases/{version}` — plugin 单版本详情
 
 > 段名为 **`releases`**（契约要求）。fork 现状是 `versions`，需加别名或对齐。
@@ -274,3 +290,5 @@
 
 > 14/14 已对齐（待两侧部署 + 真机验证）。下载走「网关反代流式端点」（路线 A）：clawhub 无需 `download-url`/`artifact-url` JSON 端点；待路线 B（MinIO 真预签名）时 clawhub 流式端点改 302、网关透传，迁移透明。
 > 剩余 follow-up：plugin install 持久化 schema、路线 B 预签名。
+
+> **分类端点（`/skills/categories`、`/plugins/categories`）不在本出站清单**：桌面端入站契约（skill-plugin-lifecycle.md §3.1b）要求该端点，但**网关侧聚合 `/skills`、`/packages` 列表派生**（每个列表项已自带 `category`/`pluginCategory`），**无需 ClawHub 新增出站端点**。若未来改由 fork 暴露原生分类端点（运营有序词汇表 + 计数），届时在此登记为第 15 条出站契约。

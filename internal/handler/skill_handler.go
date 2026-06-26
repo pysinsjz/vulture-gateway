@@ -44,6 +44,20 @@ func (h *SkillHandler) ListSkills(c *gin.Context) {
 	c.JSON(http.StatusOK, page)
 }
 
+// SkillCategories 返回 skill 浏览分类 + 计数（驱动桌面端分组标题与计数，§3.1b）。
+// 网关派生：聚合全量 /skills 列表，按 X-Platform 兼容过滤后按 category 计数。
+// 须在路由上声明于 /skills/:slug 之前语义上的同级静态段（categories 非 slug）。
+//
+//	GET /api/v1/skills/categories  (Bearer)
+func (h *SkillHandler) SkillCategories(c *gin.Context) {
+	res, err := h.svc.SkillCategories(c.Request.Context(), compatFromHeaders(c))
+	if err != nil {
+		writeClawHubError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, res)
+}
+
 // GetSkill 返回 skill 详情。
 //
 //	GET /api/v1/skills/{slug}  (Bearer)

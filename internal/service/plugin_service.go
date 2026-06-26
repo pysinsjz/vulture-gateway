@@ -40,6 +40,14 @@ type PluginVersionSummary struct {
 	Changelog string `json:"changelog"`
 }
 
+// PluginVersionHistory 是 plugin 版本历史列表项（§3.2，与 latestVersion 同形并附 distTags）。
+type PluginVersionHistory struct {
+	Version   string   `json:"version"`
+	CreatedAt int64    `json:"createdAt"`
+	Changelog string   `json:"changelog"`
+	DistTags  []string `json:"distTags,omitempty"`
+}
+
 // PluginDetail 是 plugin 详情的对外契约（§3.2）。
 type PluginDetail struct {
 	Package       PluginInfo            `json:"package"`
@@ -123,6 +131,52 @@ func (s *PluginService) ListPlugins(ctx context.Context, params PluginListParams
 		items = append(items, translatePackage(p))
 	}
 	return &Page[PluginListItem]{Items: items, NextCursor: page.NextCursor}, nil
+}
+
+// PluginCategories 派生 plugin 分类端点（§3.1b）：翻全量 /packages（游标翻页），按
+// X-Platform/X-App-Version 兼容过滤后按 pluginCategory 聚合计数。不按 family/channel 预过滤
+// （分类端点是全量分组口径）。网关派生口径（不改 ClawHub fork），已知偏差见 categoryAggregator。
+func (s *PluginService) PluginCategories(ctx context.Context, cc CompatContext) (*CategoriesResponse, error) {
+	agg := newCategoryAggregator()
+	cursor := ""
+	for i := 0; i < categoriesMaxPages; i++ {
+		page, err := s.hub.ListPackages(ctx, clawhub.ListParams{Limit: categoriesPageSize, Cursor: cursor})
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range page.Items {
+			if !compatiblePackage(p, cc) {
+				continue
+			}
+			agg.add(translateCategory(p.PluginCategory))
+		}
+		if page.NextCursor == nil || *page.NextCursor == "" {
+			break
+		}
+		cursor = *page.NextCursor
+	}
+	res := agg.result()
+	return &res, nil
+}
+
+// ListPluginVersions 转发到 ClawHub /packages/{name}/versions 并翻译为 plugin 版本历史分页。
+// 不做兼容过滤——版本历史是 plugin 已有状态的全量回放，过滤由调用方按 detail 决定。
+func (s *PluginService) ListPluginVersions(ctx context.Context, name string, page PageParams) (*Page[PluginVersionHistory], error) {
+	out, err := s.hub.ListPackageReleases(ctx, name, clawhub.PageParams{Limit: page.Limit, Cursor: page.Cursor})
+	if err != nil {
+		return nil, err
+	}
+
+	items := make([]PluginVersionHistory, 0, len(out.Items))
+	for _, v := range out.Items {
+		items = append(items, PluginVersionHistory{
+			Version:   v.Version,
+			CreatedAt: v.CreatedAt,
+			Changelog: v.Changelog,
+			DistTags:  v.DistTags,
+		})
+	}
+	return &Page[PluginVersionHistory]{Items: items, NextCursor: out.NextCursor}, nil
 }
 
 // GetPlugin 转发到 ClawHub /packages/{name} 并翻译为 PluginDetail。

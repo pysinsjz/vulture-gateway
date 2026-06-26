@@ -70,6 +70,7 @@ func NewRouter(
 		v1.DELETE("/devices/:device_id", device.DeleteDevice)
 		// skill 族：鉴权后转发内网 ClawHub skills/skillVersions（#20）。
 		v1.GET("/skills", skill.ListSkills)
+		v1.GET("/skills/categories", skill.SkillCategories) // 浏览分类+计数（§3.1b，网关派生）；须先于 :slug 通配声明
 		v1.GET("/skills/:slug", skill.GetSkill)
 		v1.GET("/skills/:slug/versions", skill.ListSkillVersions)
 		v1.GET("/skills/:slug/versions/:version", skill.GetSkillVersion)
@@ -78,7 +79,9 @@ func NewRouter(
 		v1.POST("/skills/-/security-verdicts", skill.SecurityVerdicts) // 批量安全裁决（#22）
 		// plugin 族：鉴权后转发内网 ClawHub packages/packageReleases（#19 list 曳光弹 + #20 铺满）。
 		v1.GET("/plugins", plugin.ListPlugins)
+		v1.GET("/plugins/categories", plugin.PluginCategories) // 浏览分类+计数（§3.1b，网关派生）；须先于 :name 通配声明
 		v1.GET("/plugins/:name", plugin.GetPlugin)
+		v1.GET("/plugins/:name/versions", plugin.ListPluginVersions) // 版本历史；须先于 :version 通配声明
 		v1.GET("/plugins/:name/versions/:version", plugin.GetPluginVersion)
 		v1.GET("/plugins/:name/versions/:version/security", plugin.PluginSecurity)                  // 单查安装阻断（#22）
 		v1.GET("/plugins/:name/download", plugin.DownloadPlugin)                                    // legacy-zip 302（#21）

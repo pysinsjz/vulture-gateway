@@ -219,10 +219,14 @@ interface PluginListItem {
 
 **`GET /skills/categories`** / **`GET /plugins/categories`** → 有序数组：
 ```ts
-{ categories: { id: string; label: string; count: number }[] }   // 按运营定义顺序；count = 该分类下可见制品数
+{ categories: { id: string; label: string; count: number }[] }   // count = 该分类下可见制品数
 ```
 
-- **分类词汇表**：运营在 fork 自定义（业务分类、中文 label、有序），skill/plugin 各一张；分类端点按表序输出。
+> **实现现状：网关派生（interim）。** 分类端点**由网关聚合全量列表派生**（翻 `/skills`、`/packages` 游标全量，按 `X-Platform`/`X-App-Version` 兼容过滤后按 `category.id` 计数），**不新增 ClawHub 出站端点**（出站契约 §4 不含 categories）。代码：`internal/handler/{skill,plugin}_handler.go` 的 `*Categories` + `internal/service` 的 `categoryAggregator`。
+> 派生口径的**已知偏差**（vs 下方「按运营定义顺序」目标态）：① 顺序为**首现序**（列表默认排序决定），非运营定义序；② **0 可见制品的分类不出现**；③ `category==nil` 的可见制品归入末位 `{id:"other",label:"其他"}` 桶。
+> **目标态**：ClawHub fork 暴露原生分类端点（运营有序词汇表 + 计数），网关改反代、偏差消除——届时把该端点登记进出站契约 §4，迁移对桌面端透明。
+
+- **分类词汇表**：运营在 fork 自定义（业务分类、中文 label、有序），skill/plugin 各一张；分类端点按表序输出（**目标态**；派生现状按首现序，见上）。
 - **skill 分类来源**：fork 改造点——skills 表**新增**原生 `category` 字段（单值），**发布时由运营显式指定**，未指定归 `其他`（见 clawhub-integration.md §5）。
 - **plugin 分类来源**：保留 `pluginCategory` 字段（单值，已索引），但 fork **停用其关键词派生**，同样改为发布时显式指定。
 > 原「按 `capabilityTags` 派生」方案已否决：经 fork 语料核实（1000 个 skill），`capabilityTags` 是发布时正则派生的**安全风险标签**（封闭词汇表 9 值，如 `requires-oauth-token`/`crypto`），发布者不可自定义、338 个 skill 无任何 tag，与业务分类零相关；plugin 上游的 `pluginCategory` 派生词汇表亦为英文技术分类，均无法复现业务分组。

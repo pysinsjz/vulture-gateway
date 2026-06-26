@@ -194,6 +194,71 @@ func TestSecurityVerdicts_Translates(t *testing.T) {
 	}
 }
 
+// pagedSkills 是按调用次序逐页返回的 SkillsClient fake（验证 SkillCategories 的游标翻页聚合）。
+// 嵌入 *fakeSkills 复用其余接口方法的空实现，仅覆写 ListSkills。
+type pagedSkills struct {
+	*fakeSkills
+	pages []*clawhub.SkillPage
+	calls int
+}
+
+func (f *pagedSkills) ListSkills(_ context.Context, _ clawhub.SkillListParams) (*clawhub.SkillPage, error) {
+	if f.calls >= len(f.pages) {
+		return &clawhub.SkillPage{}, nil
+	}
+	p := f.pages[f.calls]
+	f.calls++
+	return p, nil
+}
+
+// SkillCategories 派生聚合：游标翻全量 + X-Platform 兼容过滤 + 首现序 + nil→「其他」末位 + 计数。
+func TestSkillCategories_DerivesGroupedCounts(t *testing.T) {
+	fake := &pagedSkills{
+		fakeSkills: &fakeSkills{},
+		pages: []*clawhub.SkillPage{
+			{Items: []clawhub.SkillListItem{
+				{Slug: "a", Category: &clawhub.Category{ID: "research", Label: "市场调研"}, Metadata: &clawhub.SkillMetadata{Systems: []string{"darwin-arm64"}}},
+				{Slug: "b", Category: &clawhub.Category{ID: "research", Label: "市场调研"}}, // 无 metadata → 兼容
+				{Slug: "c", Category: &clawhub.Category{ID: "selection", Label: "货源与选品"}, Metadata: &clawhub.SkillMetadata{Systems: []string{"win32-x64"}}}, // 平台过滤掉
+			}, NextCursor: strPtr("c2")},
+			{Items: []clawhub.SkillListItem{
+				{Slug: "d", Category: &clawhub.Category{ID: "selection", Label: "货源与选品"}, Metadata: &clawhub.SkillMetadata{Systems: []string{"darwin-arm64"}}},
+				{Slug: "e"}, // category==nil → 「其他」
+			}, NextCursor: nil},
+		},
+	}
+	svc := service.NewSkillService(fake)
+
+	res, err := svc.SkillCategories(context.Background(), service.CompatContext{Platform: "darwin-arm64"})
+	if err != nil {
+		t.Fatalf("SkillCategories 失败: %v", err)
+	}
+	if fake.calls != 2 {
+		t.Errorf("应翻完 2 页, 实际调用 %d 次", fake.calls)
+	}
+	want := []service.CategoryCount{
+		{ID: "research", Label: "市场调研", Count: 2},  // a + b
+		{ID: "selection", Label: "货源与选品", Count: 1}, // 仅 d（c 被平台过滤），首现序在 research 之后
+		{ID: "other", Label: "其他", Count: 1},       // e，末位
+	}
+	if len(res.Categories) != len(want) {
+		t.Fatalf("分类数 = %d, 期望 %d: %+v", len(res.Categories), len(want), res.Categories)
+	}
+	for i, w := range want {
+		if res.Categories[i] != w {
+			t.Errorf("第 %d 项 = %+v, 期望 %+v", i, res.Categories[i], w)
+		}
+	}
+}
+
+// 错误传播：上游列表报错时直接上抛，不吞。
+func TestSkillCategories_PropagatesError(t *testing.T) {
+	svc := service.NewSkillService(&fakeSkills{err: &clawhub.Error{Status: 503, Code: "unavailable"}})
+	if _, err := svc.SkillCategories(context.Background(), service.CompatContext{}); err == nil {
+		t.Fatal("期望上游错误上抛, 实际 nil")
+	}
+}
+
 // 流式下载 URL：委托 ClawHub client 构造反代目标地址。
 func TestSkillDownloadStreamURL(t *testing.T) {
 	svc := service.NewSkillService(&fakeSkills{})

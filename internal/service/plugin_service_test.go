@@ -11,13 +11,16 @@ import (
 
 // fakeClawHub 是 clawhub.PackagesClient 的内存 fake，便于在不触网下单测翻译/过滤逻辑。
 type fakeClawHub struct {
-	gotParams  clawhub.ListParams
-	page       *clawhub.PackagePage
-	detail     *clawhub.PackageDetail
-	release    *clawhub.PackageReleaseDetail
-	trust      *clawhub.PluginTrust
-	gotVersion string
-	err        error
+	gotParams       clawhub.ListParams
+	gotVersionsPage clawhub.PageParams
+	gotVersionsName string
+	page            *clawhub.PackagePage
+	detail          *clawhub.PackageDetail
+	release         *clawhub.PackageReleaseDetail
+	releasesPage    *clawhub.PackageReleasePage
+	trust           *clawhub.PluginTrust
+	gotVersion      string
+	err             error
 }
 
 func (f *fakeClawHub) ListPackages(_ context.Context, params clawhub.ListParams) (*clawhub.PackagePage, error) {
@@ -31,6 +34,12 @@ func (f *fakeClawHub) GetPackage(_ context.Context, _ string) (*clawhub.PackageD
 
 func (f *fakeClawHub) GetPackageRelease(_ context.Context, _, _ string) (*clawhub.PackageReleaseDetail, error) {
 	return f.release, f.err
+}
+
+func (f *fakeClawHub) ListPackageReleases(_ context.Context, name string, page clawhub.PageParams) (*clawhub.PackageReleasePage, error) {
+	f.gotVersionsName = name
+	f.gotVersionsPage = page
+	return f.releasesPage, f.err
 }
 
 func (f *fakeClawHub) PackageDownloadStreamURL(name, version string) string {
@@ -171,6 +180,72 @@ func TestListPlugins_PropagatesError(t *testing.T) {
 	}
 }
 
+// pagedPackages 是按调用次序逐页返回的 PackagesClient fake（验证 PluginCategories 的游标翻页聚合）。
+// 嵌入 *fakeClawHub 复用其余接口方法，仅覆写 ListPackages。
+type pagedPackages struct {
+	*fakeClawHub
+	pages []*clawhub.PackagePage
+	calls int
+}
+
+func (f *pagedPackages) ListPackages(_ context.Context, _ clawhub.ListParams) (*clawhub.PackagePage, error) {
+	if f.calls >= len(f.pages) {
+		return &clawhub.PackagePage{}, nil
+	}
+	p := f.pages[f.calls]
+	f.calls++
+	return p, nil
+}
+
+// PluginCategories 派生聚合：游标翻全量 + X-Platform 兼容过滤 + 首现序 + nil→「其他」末位 + 计数。
+func TestPluginCategories_DerivesGroupedCounts(t *testing.T) {
+	fake := &pagedPackages{
+		fakeClawHub: &fakeClawHub{},
+		pages: []*clawhub.PackagePage{
+			{Items: []clawhub.PackageListItem{
+				{Name: "@v/a", PluginCategory: &clawhub.Category{ID: "ecommerce", Label: "电商与市场"}},
+				{Name: "@v/b", PluginCategory: &clawhub.Category{ID: "marketing", Label: "营销与广告"}, HostTargets: []string{"win32-x64"}}, // 平台过滤掉
+				{Name: "@v/c", PluginCategory: &clawhub.Category{ID: "ecommerce", Label: "电商与市场"}, HostTargets: []string{"darwin-arm64"}},
+			}, NextCursor: strPtr("c2")},
+			{Items: []clawhub.PackageListItem{
+				{Name: "@v/d", PluginCategory: &clawhub.Category{ID: "marketing", Label: "营销与广告"}},
+				{Name: "@v/e"}, // pluginCategory==nil → 「其他」
+			}, NextCursor: nil},
+		},
+	}
+	svc := service.NewPluginService(fake)
+
+	res, err := svc.PluginCategories(context.Background(), service.CompatContext{Platform: "darwin-arm64"})
+	if err != nil {
+		t.Fatalf("PluginCategories 失败: %v", err)
+	}
+	if fake.calls != 2 {
+		t.Errorf("应翻完 2 页, 实际调用 %d 次", fake.calls)
+	}
+	want := []service.CategoryCount{
+		{ID: "ecommerce", Label: "电商与市场", Count: 2}, // a + c
+		{ID: "marketing", Label: "营销与广告", Count: 1},  // 仅 d（b 被平台过滤），首现序在 ecommerce 之后
+		{ID: "other", Label: "其他", Count: 1},        // e，末位
+	}
+	if len(res.Categories) != len(want) {
+		t.Fatalf("分类数 = %d, 期望 %d: %+v", len(res.Categories), len(want), res.Categories)
+	}
+	for i, w := range want {
+		if res.Categories[i] != w {
+			t.Errorf("第 %d 项 = %+v, 期望 %+v", i, res.Categories[i], w)
+		}
+	}
+}
+
+// 错误传播：上游列表报错时直接上抛。
+func TestPluginCategories_PropagatesError(t *testing.T) {
+	hubErr := &clawhub.Error{Status: 503, Code: "unavailable"}
+	svc := service.NewPluginService(&fakeClawHub{err: hubErr})
+	if _, err := svc.PluginCategories(context.Background(), service.CompatContext{}); !errors.Is(err, hubErr) {
+		t.Errorf("应原样上抛 ClawHub 错误, 实际 %v", err)
+	}
+}
+
 // 详情翻译：pluginCategory → category，latestVersion + compatibility 整形。
 func TestGetPlugin_Translates(t *testing.T) {
 	fake := &fakeClawHub{
@@ -195,6 +270,58 @@ func TestGetPlugin_Translates(t *testing.T) {
 	}
 	if d.Compatibility == nil || d.Compatibility.MinAppVersion != "1.0.0" {
 		t.Errorf("compatibility 翻译错误: %+v", d.Compatibility)
+	}
+}
+
+// 版本历史翻译：透传 version/createdAt/changelog/distTags + 游标。
+func TestListPluginVersions_Translates(t *testing.T) {
+	cursor := "cur-2"
+	fake := &fakeClawHub{
+		releasesPage: &clawhub.PackageReleasePage{
+			Items: []clawhub.PackageReleaseHistory{
+				{Version: "0.1.0", CreatedAt: 100, Changelog: "init", DistTags: []string{"latest"}},
+				{Version: "0.0.9", CreatedAt: 50, Changelog: "preview"},
+			},
+			NextCursor: &cursor,
+		},
+	}
+	svc := service.NewPluginService(fake)
+
+	page, err := svc.ListPluginVersions(
+		context.Background(), "@v/x",
+		service.PageParams{Limit: 25, Cursor: "cur-1"},
+	)
+	if err != nil {
+		t.Fatalf("ListPluginVersions 失败: %v", err)
+	}
+	if fake.gotVersionsName != "@v/x" {
+		t.Errorf("name 透传错误: %q", fake.gotVersionsName)
+	}
+	if fake.gotVersionsPage.Limit != 25 || fake.gotVersionsPage.Cursor != "cur-1" {
+		t.Errorf("分页参数透传错误: %+v", fake.gotVersionsPage)
+	}
+	if len(page.Items) != 2 {
+		t.Fatalf("items 数量错误: %d", len(page.Items))
+	}
+	if page.Items[0].Version != "0.1.0" || page.Items[0].CreatedAt != 100 ||
+		page.Items[0].Changelog != "init" || len(page.Items[0].DistTags) != 1 ||
+		page.Items[0].DistTags[0] != "latest" {
+		t.Errorf("第一项翻译错误: %+v", page.Items[0])
+	}
+	if page.Items[1].DistTags != nil {
+		t.Errorf("无 distTags 时应保持空, 实际 %+v", page.Items[1].DistTags)
+	}
+	if page.NextCursor == nil || *page.NextCursor != "cur-2" {
+		t.Errorf("游标透传错误: %+v", page.NextCursor)
+	}
+}
+
+// 错误传播：上游版本历史报错时直接上抛。
+func TestListPluginVersions_PropagatesError(t *testing.T) {
+	hubErr := &clawhub.Error{Status: 503, Code: "unavailable"}
+	svc := service.NewPluginService(&fakeClawHub{err: hubErr})
+	if _, err := svc.ListPluginVersions(context.Background(), "@v/x", service.PageParams{}); !errors.Is(err, hubErr) {
+		t.Errorf("应原样上抛 ClawHub 错误, 实际 %v", err)
 	}
 }
 

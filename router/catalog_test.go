@@ -95,6 +95,63 @@ func TestSkills_ListAndPlatformFilter(t *testing.T) {
 	}
 }
 
+// 分类端点正路（§3.1b，网关派生）：/skills/categories、/plugins/categories 落到分类 handler，
+// 聚合上游列表端点（/skills、/packages）而非被当作 slug/name 查单个制品。
+// 这正是原 bug 的回归点：曾经 GET /api/v1/skills/categories 落到 :slug 通配 → 上游按 skill 查
+// categories → 404 "Skill not found"。
+func TestCatalog_CategoriesEndpoints(t *testing.T) {
+	stub := newCatalogStub(t, map[string]func() (int, string){
+		"/skills": ok(`{"items":[
+			{"slug":"a","category":{"id":"research","label":"市场调研"}},
+			{"slug":"b","category":{"id":"research","label":"市场调研"}},
+			{"slug":"c"}
+		],"nextCursor":null}`),
+		"/packages": ok(`{"items":[
+			{"name":"@v/a","pluginCategory":{"id":"ecommerce","label":"电商与市场"}},
+			{"name":"@v/b","pluginCategory":{"id":"marketing","label":"营销与广告"}}
+		],"nextCursor":null}`),
+	})
+	e := newTestEngine(t, withClawHub(stub.srv.URL))
+	token := issueViaScaffold(t, e, "u", "d")
+
+	type catResp struct {
+		Categories []struct {
+			ID    string `json:"id"`
+			Label string `json:"label"`
+			Count int    `json:"count"`
+		} `json:"categories"`
+	}
+
+	// skill 分类：research(2) + 其他(1，c 无分类)。
+	rec := do(t, e, http.MethodGet, "/api/v1/skills/categories", token, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("skill categories 期望 200（非落到 :slug → 404），实际 %d: %s", rec.Code, rec.Body.String())
+	}
+	var sc catResp
+	if err := json.Unmarshal(rec.Body.Bytes(), &sc); err != nil {
+		t.Fatalf("解析 skill categories 失败: %v (%s)", err, rec.Body.String())
+	}
+	if len(sc.Categories) != 2 || sc.Categories[0].ID != "research" || sc.Categories[0].Count != 2 {
+		t.Errorf("skill 分类聚合错误: %+v", sc.Categories)
+	}
+	if last := sc.Categories[len(sc.Categories)-1]; last.ID != "other" || last.Count != 1 {
+		t.Errorf("未分类应归末位『其他』(count=1), 实际 %+v", last)
+	}
+
+	// plugin 分类：ecommerce(1) + marketing(1)，无未分类桶。
+	rec = do(t, e, http.MethodGet, "/api/v1/plugins/categories", token, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("plugin categories 期望 200（非落到 :name → 404），实际 %d: %s", rec.Code, rec.Body.String())
+	}
+	var pc catResp
+	if err := json.Unmarshal(rec.Body.Bytes(), &pc); err != nil {
+		t.Fatalf("解析 plugin categories 失败: %v (%s)", err, rec.Body.String())
+	}
+	if len(pc.Categories) != 2 || pc.Categories[0].ID != "ecommerce" || pc.Categories[1].ID != "marketing" {
+		t.Errorf("plugin 分类聚合错误: %+v", pc.Categories)
+	}
+}
+
 // skill 详情 / 版本历史 / 指定版本（含 artifact.sha256）正路。
 func TestSkills_DetailVersionsAndVersion(t *testing.T) {
 	stub := newCatalogStub(t, map[string]func() (int, string){

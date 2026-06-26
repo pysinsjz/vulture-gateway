@@ -295,5 +295,18 @@ if code_ != 401:
     die(f"skills(无 token) 期望 401，实际 {code_}；body={body[:200]}")
 ok("无 token 正确 401")
 
-print("\n✅ PASS — ClawHub 全链路（网关鉴权 → 列表/详情/版本/resolve/下载反代/遥测）端到端通过")
+# ── 分类端点（§3.1b，网关派生聚合）──
+step(11, "GET /api/v1/skills|plugins/categories（Bearer，网关派生）→ 200 + categories 数组（非 404）")
+scat = get_json("skill categories", "/api/v1/skills/categories", access)
+pcat = get_json("plugin categories", "/api/v1/plugins/categories", access)
+for nm, resp in (("skill", scat), ("plugin", pcat)):
+    cats = resp.get("categories")
+    if not isinstance(cats, list):
+        die(f"{nm} categories 响应缺 categories 数组：{str(resp)[:200]}")
+    for it in cats:
+        if not all(k in it for k in ("id", "label", "count")):
+            die(f"{nm} categories 项形态错误（缺 id/label/count）：{it}")
+ok(f"skill 分类 {len(scat['categories'])} 组 / plugin 分类 {len(pcat['categories'])} 组（各项含 id/label/count；曾经此处 404）")
+
+print("\n✅ PASS — ClawHub 全链路（网关鉴权 → 列表/详情/版本/resolve/下载反代/遥测/分类派生）端到端通过")
 sys.exit(0)

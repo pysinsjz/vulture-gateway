@@ -27,6 +27,8 @@ type PackagesClient interface {
 	GetPackage(ctx context.Context, name string) (*PackageDetail, error)
 	// GetPackageRelease 调用 ClawHub GET /packages/{name}/releases/{version}，返回指定版本详情。
 	GetPackageRelease(ctx context.Context, name, version string) (*PackageReleaseDetail, error)
+	// ListPackageReleases 调用 ClawHub GET /packages/{name}/versions，返回 plugin 版本历史分页。
+	ListPackageReleases(ctx context.Context, name string, page PageParams) (*PackageReleasePage, error)
 	// PackageDownloadStreamURL 构造 plugin（legacy-zip）流式下载端点的绝对 URL：
 	// GET {base}/packages/{name}/download?version=。网关反代此端点把字节透传回桌面端（interim
 	// 路线 A）；安全门由 ClawHub 在该端点内强制（getReleaseSecurityBlock，返 403/410/451 等）。
