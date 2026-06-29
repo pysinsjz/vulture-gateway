@@ -118,43 +118,6 @@ func TestGenerateKey_MissingKeyIsError(t *testing.T) {
 	}
 }
 
-// ListModelIDs 注入 Master Key，调 GET /v1/models 解析出模型 id 列表。
-func TestListModelIDs_ParsesIDs(t *testing.T) {
-	var gotAuth, gotPath string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAuth = r.Header.Get("Authorization")
-		gotPath = r.URL.Path
-		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"qwen3.7-plus"},{"id":"deepseek/deepseek-v4-pro"},{"id":""}]}`))
-	}))
-	defer srv.Close()
-
-	c := litellm.NewAdminClient(srv.URL, "sk-master", srv.Client())
-	ids, err := c.ListModelIDs(context.Background())
-	if err != nil {
-		t.Fatalf("ListModelIDs 失败: %v", err)
-	}
-	if gotPath != "/v1/models" || gotAuth != "Bearer sk-master" {
-		t.Errorf("path=%q auth=%q", gotPath, gotAuth)
-	}
-	// 空 id 被过滤。
-	if len(ids) != 2 || ids[0] != "qwen3.7-plus" || ids[1] != "deepseek/deepseek-v4-pro" {
-		t.Errorf("解析模型 id 错误: %+v", ids)
-	}
-}
-
-// ListModelIDs 上游非 2xx → 错误。
-func TestListModelIDs_UpstreamError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusUnauthorized)
-	}))
-	defer srv.Close()
-
-	c := litellm.NewAdminClient(srv.URL, "bad", srv.Client())
-	if _, err := c.ListModelIDs(context.Background()); err == nil {
-		t.Fatal("期望错误, 实际 nil")
-	}
-}
-
 // DeleteKey 注入 Master Key，按 keys 数组下发待删 key。
 func TestDeleteKey_PostsKeysWithMaster(t *testing.T) {
 	var gotAuth, gotPath string

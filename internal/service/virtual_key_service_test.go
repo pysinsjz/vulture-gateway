@@ -83,8 +83,6 @@ type fakeAdmin struct {
 	nextKey    string
 	failGen    bool
 	keyCounter int
-	models     []string // ListModelIDs 返回；nil 时默认给一份非空清单
-	listFails  bool
 	lastModels []string // 记录最后一次 GenerateKey 收到的 Models
 }
 
@@ -104,18 +102,6 @@ func (a *fakeAdmin) GenerateKey(_ context.Context, p litellm.GenerateKeyParams) 
 		key = "sk-gen-" + p.UserID
 	}
 	return &litellm.GeneratedKey{Key: key, TokenID: "tok"}, nil
-}
-
-func (a *fakeAdmin) ListModelIDs(_ context.Context) ([]string, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.listFails {
-		return nil, errors.New("litellm /v1/models 不可达")
-	}
-	if a.models != nil {
-		return a.models, nil
-	}
-	return []string{"m1", "m2"}, nil // 默认非空，令签发路径可走通
 }
 
 func (a *fakeAdmin) DeleteKey(_ context.Context, key string) error {
@@ -164,7 +150,7 @@ func newSvc() (*service.VirtualKeyService, *fakeVKeyRepo, *fakeAdmin, *fakeCache
 	repo := newFakeVKeyRepo()
 	admin := newFakeAdmin()
 	cache := newFakeCache()
-	svc := service.NewVirtualKeyService(repo, admin, cache, fakeLocker{})
+	svc := service.NewVirtualKeyService(repo, admin, cache, fakeLocker{}, "vulture")
 	return svc, repo, admin, cache
 }
 
@@ -223,45 +209,29 @@ func TestGetOrCreate_FirstSign(t *testing.T) {
 	}
 }
 
-// 首签把 litellm 当前模型清单显式写进 key（ADR-0014 修订：不留空＝避免 All Proxy Models 通配）。
-func TestGetOrCreate_SignCarriesModelList(t *testing.T) {
-	svc, _, admin, _ := newSvc()
-	admin.models = []string{"qwen3.7-plus", "deepseek/deepseek-v4-pro"}
+// 首签下发单一 model access group 名（ADR-0014 修订：从枚举全量明细改为下发组名，组成员维护在 litellm 侧）。
+func TestGetOrCreate_SignCarriesAccessGroup(t *testing.T) {
+	svc, _, admin, _ := newSvc() // newSvc 注入组名 "vulture"
 
 	if _, err := svc.GetOrCreateVirtualKey(context.Background(), "u1"); err != nil {
 		t.Fatalf("err=%v", err)
 	}
-	if len(admin.lastModels) != 2 || admin.lastModels[0] != "qwen3.7-plus" {
-		t.Errorf("签发应带显式模型清单, 实际 %+v", admin.lastModels)
+	if len(admin.lastModels) != 1 || admin.lastModels[0] != "vulture" {
+		t.Errorf("签发应只下发 access group 名 [vulture], 实际 %+v", admin.lastModels)
 	}
 }
 
-// 模型清单拉取失败 → 拒签（不退回全开 key），不落库。
-func TestGetOrCreate_ModelListFailureRefusesSign(t *testing.T) {
-	svc, repo, admin, _ := newSvc()
-	admin.listFails = true
+// 空组名构造时回退默认 "vulture"（零配置兜底）。
+func TestSign_EmptyGroupFallsBackToDefault(t *testing.T) {
+	repo := newFakeVKeyRepo()
+	admin := newFakeAdmin()
+	svc := service.NewVirtualKeyService(repo, admin, newFakeCache(), fakeLocker{}, "")
 
-	if _, err := svc.GetOrCreateVirtualKey(context.Background(), "u1"); err == nil {
-		t.Fatal("模型清单拉取失败应拒签")
+	if _, err := svc.GetOrCreateVirtualKey(context.Background(), "u1"); err != nil {
+		t.Fatalf("err=%v", err)
 	}
-	if admin.genCalls != 0 {
-		t.Errorf("拉取失败不应调 GenerateKey")
-	}
-	if repo.rows["u1"] != nil {
-		t.Errorf("拒签不应落库")
-	}
-}
-
-// 模型清单为空 → 拒签（避免 litellm 视空数组为全开/无权的歧义）。
-func TestGetOrCreate_EmptyModelListRefusesSign(t *testing.T) {
-	svc, _, admin, _ := newSvc()
-	admin.models = []string{} // 非 nil 的空清单
-
-	if _, err := svc.GetOrCreateVirtualKey(context.Background(), "u1"); err == nil {
-		t.Fatal("模型清单为空应拒签")
-	}
-	if admin.genCalls != 0 {
-		t.Errorf("清单为空不应调 GenerateKey")
+	if len(admin.lastModels) != 1 || admin.lastModels[0] != "vulture" {
+		t.Errorf("空组名应回退默认 [vulture], 实际 %+v", admin.lastModels)
 	}
 }
 

@@ -55,8 +55,9 @@ clawhub:
 # LLM 代理（litellm proxy，ADR-0005/0014）：网关鉴权后转发，按用户注入专属 virtual key。
 # master_key 仅 Admin Client 用来签发/删用户 key（永不转发推理），建议用 VG_LLM_MASTER_KEY 覆盖；dev 本地无鉴权 litellm 可留空。
 llm:
-  base_url: "http://127.0.0.1:4000"
-  master_key: ""            # litellm 管理员 key（VG_LLM_MASTER_KEY 注入；dev 留空＝本地无鉴权）
+  base_url: "http://47.110.248.193:4000"
+  master_key: "sk-2e2c4c66bbc2dbcae046637d06312630f1c8367bdab4fee4701712f088ab391b"            # litellm 管理员 key（VG_LLM_MASTER_KEY 注入；dev 留空＝本地无鉴权）
+  model_access_group: "vulture"  # 签发用户 key 时下发的 litellm model access group 名（ADR-0014 修订）；组成员在 litellm 侧维护，默认 vulture
   vkey_cache_ttl: "1h"      # 用户 virtual key 的 Redis 缓存寿命（DB 为真相源）
   timeout: "30s"
   stream_idle_timeout: "120s"   # 流式推理 chunk 间空闲上限（#24 / ADR-0008）

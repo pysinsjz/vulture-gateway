@@ -17,9 +17,6 @@ type AdminClient interface {
 	GenerateKey(ctx context.Context, params GenerateKeyParams) (*GeneratedKey, error)
 	// DeleteKey 调 litellm POST /key/delete 删除一把 key（按完整 key 字符串）。用于并发首签的孤儿回删与删用户接缝。
 	DeleteKey(ctx context.Context, litellmKey string) error
-	// ListModelIDs 调 litellm GET /v1/models（Master Key 鉴权）拉当前全部模型 id，
-	// 供签发时把模型清单显式写进用户 key（避免 litellm 的 "All Proxy Models" 通配，ADR-0014 修订）。
-	ListModelIDs(ctx context.Context) ([]string, error)
 }
 
 // GenerateKeyParams 是签发参数（ADR-0014）：models 空＝全部（不下发该字段）；duration/rpm 不设；max_budget 为保险丝。
@@ -85,45 +82,6 @@ func (c *adminHTTPClient) GenerateKey(ctx context.Context, params GenerateKeyPar
 		tokenID = parsed.Token // 兼容仅返回 token 字段的版本
 	}
 	return &GeneratedKey{Key: parsed.Key, TokenID: tokenID}, nil
-}
-
-func (c *adminHTTPClient) ListModelIDs(ctx context.Context) ([]string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/models", nil)
-	if err != nil {
-		return nil, fmt.Errorf("构造 litellm 模型列表请求失败: %w", err)
-	}
-	if c.masterKey != "" {
-		req.Header.Set("Authorization", "Bearer "+c.masterKey)
-	}
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("调用 litellm /v1/models 失败: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("读取 litellm /v1/models 响应失败: %w", err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("litellm /v1/models 返回 %d: %s", resp.StatusCode, string(body))
-	}
-
-	var parsed struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		return nil, fmt.Errorf("解析 litellm /v1/models 响应失败: %w", err)
-	}
-	ids := make([]string, 0, len(parsed.Data))
-	for _, m := range parsed.Data {
-		if m.ID != "" {
-			ids = append(ids, m.ID)
-		}
-	}
-	return ids, nil
 }
 
 func (c *adminHTTPClient) DeleteKey(ctx context.Context, litellmKey string) error {

@@ -26,6 +26,12 @@ ADR-0005 让 litellm 退化为「上游模型路由器 + 供应商 key 持有方
 
   **【修订 2026-06-25】`models` 不再留空＝全部。** 原决策让 key 留空 models（litellm 渲染为 "All Proxy Models" 通配，把模型访问控制全交给网关/套餐层）。实测发现这会让每把用户 key 在 litellm 后台都是通配全开、不可审计具体模型，遂改为：**签发前网关用 Master Key 调 litellm `GET /v1/models` 拉当前全部模型 id，显式逐个写进 key 的 `models`**。语义仍是「当前全部模型」（自动跟随 litellm 新增/下线，无需手工维护清单），但 key 上是**显式枚举**而非通配，后台可审计、可为将来按套餐裁剪留口。**拉取失败或清单为空一律拒签**（返错由 lazy 重试），**绝不退回全开 key**——宁可本次签发失败也不发出通配 key。模型访问控制的「网关/套餐职责」定位不变，此修订只改 key 上的表达形式。
 
+  **【修订 2026-06-29，Supersedes 2026-06-25】`models`＝单一 model access group 名（`vulture`）。** 上版「显式枚举全量」虽可审计，但把模型集合**冻结在签发时刻**——litellm 新增模型后存量 key 看不到，运维没有「改一处即对所有 key 生效」的入口。本次改为：**签发恒下发 `models: ["<组名>"]`**（组名取自 `config.llm.model_access_group`，默认 `vulture`），组成员在 litellm 侧用 `model_info.access_groups` 维护。模型集合的真相源迁回 litellm 配置侧，改组即对后续所有 key 生效、无需重签。要点：
+  - **`/v1/models` 展示无需网关介入（已实测）**：litellm 在 `GET /v1/models` 会自动把 access group 展开成组内真实模型 id，桌面端经用户 key 转发即拿到正确清单——`ListModels` 链路零改动。
+  - **fail-open 被结构性消除**：恒下发非空 `["组名"]`，不再有空 models→通配全开的歧义；新失效态是「组错配为空/不存在 → key 解析为零模型」（fail-closed，安全方向）。遂**删去**上版「拉清单、空则拒签」的全开闸与 `AdminClient.ListModelIDs`（已无调用方）；网关**不**再做签发前枚举校验（组成员归属 litellm 运维侧）。
+  - **存量 key 不主动迁移**：仅新签发的 key 用组形式；存量「冻结明细」key 维持原样，靠失败处理 ② 的 401/403 自愈轮换惰性重签成组形式。
+  - **运维前置**：上线时需在 litellm 侧把该开放的模型打上 `access_groups:["vulture"]`，否则新 key 可用模型塌缩到组内现有成员。
+
 - **请求链路：Admin / Proxy 双客户端 + service 层解析 + Redis 缓存。** 拆出 **Admin Client**（持 Master Key，做 `Generate/Delete/Update`）与改造后的 **Proxy Client**（`ChatCompletions`/`ListModels` 方法签名加 key 参，去掉构造期单 key）。key 解析收敛在 service 层：handler 多传 `userUUID` → service `GetOrCreate` → Proxy Client 注入。热路径加 Redis 缓存（`vkey:{uuid}`→key，带 TTL），DB 为真相源、缓存失效回查。`/v1/models` 同样走用户 key。**现有门禁（订阅 402 / 体积 413 / 窗口预检 429）与计量逻辑一行不改，本次只替换 key 注入。**
 
 - **失败处理。** ① 推理时 `GetOrCreate` 失败（litellm 不可达）→ 返 OpenAI 形态 `upstream_unavailable`(502)，**不退回共享 key**。② 库里 key 被 litellm 拒绝（上游 401/403，如 key 被手工删）→ **一次性自愈**：标 `revoked` + 清缓存 + 重新签发 + 对本次请求重试一次，仅一次防死循环；该自愈发生在 handler 的「上游非 200」分支（流式响应体尚未开写，无部分写入风险）。

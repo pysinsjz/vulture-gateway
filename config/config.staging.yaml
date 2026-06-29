@@ -31,6 +31,7 @@ oauth:
 llm:
   base_url: "https://litellm-0w6x.srv1477684.hstgr.cloud"
   master_key: ""
+  model_access_group: "vulture"  # 签发用户 key 时下发的 litellm model access group 名（ADR-0014 修订）；组成员在 litellm 侧维护
   vkey_cache_ttl: "1h"
 
 # 预发关闭脚手架签发端点。

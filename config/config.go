@@ -72,6 +72,10 @@ type LLMConfig struct {
 	// MasterKey 是 litellm 管理员 key（ADR-0014）：仅 Admin Client 用来签发/删用户 virtual key，永不转发推理。
 	// VG_LLM_MASTER_KEY 注入；prod/staging 必填。空则不带管理鉴权头（dev 本地无鉴权 litellm）。
 	MasterKey string `mapstructure:"master_key"`
+	// ModelAccessGroup 是签发用户 virtual key 时下发的 litellm model access group 名（ADR-0014 修订）。
+	// 签发恒发 models:["<组名>"]，组成员在 litellm 侧用 model_info.access_groups 维护——改组即对后续所有 key 生效，无需重签。
+	// 默认 "vulture"；各环境 litellm 实例可用不同组名。
+	ModelAccessGroup string `mapstructure:"model_access_group"`
 	// VKeyCacheTTL 是用户 virtual key 的 Redis 缓存寿命（热路径，DB 为真相源），默认 1h。
 	VKeyCacheTTL time.Duration `mapstructure:"vkey_cache_ttl"`
 	Timeout      time.Duration `mapstructure:"timeout"` // 非流式（如 /v1/models）转发超时，默认 30s
@@ -236,6 +240,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("clawhub.base_url", "http://127.0.0.1:3211/api/v1")
 	v.SetDefault("clawhub.timeout", "10s")
 	v.SetDefault("llm.base_url", "http://127.0.0.1:4000")
+	v.SetDefault("llm.model_access_group", "vulture")
 	v.SetDefault("llm.vkey_cache_ttl", "1h")
 	v.SetDefault("llm.timeout", "30s")
 	v.SetDefault("llm.stream_idle_timeout", "120s")

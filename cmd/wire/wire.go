@@ -108,7 +108,7 @@ func WireApp(cfg *config.Configuration) (*App, error) {
 	// 用户 virtual key get-or-create：DB 真相源 + Redis 缓存热路径 + 复用 auth.Locker 做分布式锁防双签。
 	vkeyDAO := dao.NewUserVirtualKeyDAO(gdb)
 	vkeyCache := service.NewRedisVKeyCache(rdb, cfg.LLM.VKeyCacheTTL)
-	virtualKeyService := service.NewVirtualKeyService(vkeyDAO, llmAdminClient, vkeyCache, locker)
+	virtualKeyService := service.NewVirtualKeyService(vkeyDAO, llmAdminClient, vkeyCache, locker, cfg.LLM.ModelAccessGroup)
 	llmService := service.NewLLMService(llmClient, virtualKeyService)
 	// 订阅检查为占位（#25）：active = !StubNoSubscription，待计费 C 域接入真实 Subscription。
 	subChecker := service.NewStubSubscriptionChecker(!cfg.LLM.StubNoSubscription)

@@ -29,15 +29,21 @@ const (
 // VirtualKeyService 是 ADR-0014 的单一入口：按用户 get-or-create litellm virtual key + 自愈轮换 + 删除接缝。
 // DB 为真相源，Redis 缓存热路径，分布式锁 + 唯一约束 + 冲突回删三重防孤儿。限额权威仍在网关侧（不改 ADR-0005/0008）。
 type VirtualKeyService struct {
-	repo   dao.UserVirtualKeyRepository
-	admin  litellm.AdminClient
-	cache  VKeyCache
-	locker VKeyLocker
+	repo        dao.UserVirtualKeyRepository
+	admin       litellm.AdminClient
+	cache       VKeyCache
+	locker      VKeyLocker
+	accessGroup string // 签发时下发的 litellm model access group 名（ADR-0014 修订）
 }
 
-// NewVirtualKeyService 构造服务。
-func NewVirtualKeyService(repo dao.UserVirtualKeyRepository, admin litellm.AdminClient, cache VKeyCache, locker VKeyLocker) *VirtualKeyService {
-	return &VirtualKeyService{repo: repo, admin: admin, cache: cache, locker: locker}
+const defaultModelAccessGroup = "vulture" // accessGroup 为空时的兜底组名
+
+// NewVirtualKeyService 构造服务。accessGroup 为签发用户 key 时下发的 litellm model access group 名；空则回退 "vulture"。
+func NewVirtualKeyService(repo dao.UserVirtualKeyRepository, admin litellm.AdminClient, cache VKeyCache, locker VKeyLocker, accessGroup string) *VirtualKeyService {
+	if accessGroup == "" {
+		accessGroup = defaultModelAccessGroup
+	}
+	return &VirtualKeyService{repo: repo, admin: admin, cache: cache, locker: locker, accessGroup: accessGroup}
 }
 
 func vkeyAlias(userUUID string) string   { return "user-" + userUUID }
@@ -193,19 +199,13 @@ func (s *VirtualKeyService) persistFirst(ctx context.Context, userUUID string, g
 }
 
 func (s *VirtualKeyService) sign(ctx context.Context, userUUID string) (*litellm.GeneratedKey, error) {
-	// 签发时动态拉 litellm 当前全部模型，显式写进 key（ADR-0014 修订：不留空＝避免 "All Proxy Models" 通配）。
-	// 拉取失败或清单为空一律拒签——绝不退回全开 key（宁可本次失败，由 lazy 重试）。
-	models, err := s.admin.ListModelIDs(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("拉取 litellm 模型清单失败（拒绝签发全开 key）: %w", err)
-	}
-	if len(models) == 0 {
-		return nil, fmt.Errorf("litellm 模型清单为空，拒绝签发全开 key user=%s", userUUID)
-	}
+	// 签发恒下发单一 model access group 名（ADR-0014 修订：从「枚举全量明细写死」改为「下发组名」）。
+	// 组成员维护在 litellm 侧，改组即对后续所有 key 生效，无需重签。models 非空＝结构上消除 "All Proxy Models" 全开；
+	// 组若错配为空/不存在，key 解析为零模型（fail-closed，安全方向），网关不再做枚举校验。
 	gen, err := s.admin.GenerateKey(ctx, litellm.GenerateKeyParams{
 		KeyAlias:  vkeyAlias(userUUID),
 		UserID:    userUUID,
-		Models:    models,
+		Models:    []string{s.accessGroup},
 		MaxBudget: vkeyMaxBudgetFuse,
 	})
 	if err != nil {
