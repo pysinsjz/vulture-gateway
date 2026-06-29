@@ -6,7 +6,7 @@
   PKCE → GET /oauth/authorize → 302 跳网关登录页 /oauth/login?lk=…
        → GET /oauth/login 取 CSRF token
        → POST /oauth/send-code（email_code）→ stub 发码器把验证码写入 Redis
-       → 从 Redis 读取该 dest 的验证码（otp:code:<email>）
+       → 从 Redis 读取该 dest 的验证码（otp:login:code:<email>，OTP 用途隔离后命名空间，ADR-0015/#40）
        → POST /oauth/login（lk+csrf+identifier+验证码）→ 302 回环带 GW_CODE
        → POST /oauth/token（GW_CODE+verifier+device）→ access/refresh JWT
        → GET /api/v1/whoami(Bearer) == 200，且无 token == 401
@@ -181,9 +181,9 @@ if code_ != 200:
 ok(f"发码请求受理：{body.strip()}")
 
 # ---- [4] 从 Redis 读取验证码 ----
-step(4, f"Redis GET otp:code:{SMOKE_EMAIL}")
+step(4, f"Redis GET otp:login:code:{SMOKE_EMAIL}")
 try:
-    otp = redis_get(f"otp:code:{SMOKE_EMAIL}")
+    otp = redis_get(f"otp:login:code:{SMOKE_EMAIL}")
 except Exception as e:  # noqa: BLE001
     die(f"读取 Redis 验证码失败：{e}（检查 REDIS_HOST/PORT/DB/PASS）")
 if not otp or not re.fullmatch(r"\d{6}", otp):
