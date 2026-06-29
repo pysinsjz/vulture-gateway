@@ -170,9 +170,10 @@ func WireApp(cfg *config.Configuration, opts ...Option) (*App, error) {
 	scaffoldHandler := handler.NewScaffoldHandler(signer, tvs)
 	oauthHandler := handler.NewOAuthHandler(authzStore, gwCodeStore, userDAO, oauthService, cfg.OAuth.ClientID)
 	loginHandler := handler.NewLoginHandler(signinRegistry, otpService, authzStore, gwCodeStore, userDAO, virtualKeyService, rsaDecryptor, csrfStore)
-	// 设密码（ADR-0015 / #39）：service 编排解密+策略+账号级写入；handler 承接 Bearer 铸链与托管页。
-	passwordService := service.NewPasswordService(identityDAO, hasher, rsaDecryptor, transactor)
-	passwordHandler := handler.NewPasswordHandler(passwordService, passwordLinkStore, csrfStore, rsaDecryptor, cfg.OAuth.GatewayBaseURL)
+	// 设/改密（ADR-0015 / #39、#40）：service 编排解密+策略+（改密）pwreset 验码+失败限流+账号级写入；
+	// handler 承接 Bearer 铸链、托管页与改密发码。otp/limiter 复用登录链路同一组件。
+	passwordService := service.NewPasswordService(identityDAO, hasher, rsaDecryptor, transactor, otpStore, rateLimiter)
+	passwordHandler := handler.NewPasswordHandler(passwordService, otpService, passwordLinkStore, csrfStore, rsaDecryptor, cfg.OAuth.GatewayBaseURL)
 	deviceHandler := handler.NewDeviceHandler(signer, deviceService)
 	// 下载代理（interim）：把内网 ClawHub 制品字节经网关回传桌面端（路线 A 伪预签名）。客户端无超时，
 	// 由请求 ctx 约束生命周期；待 ClawHub 路线 B（MinIO 真预签名、公网可达）落地后改回直接 302。

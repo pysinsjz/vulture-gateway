@@ -91,6 +91,34 @@ func TestRateLimiter_LoginPerIPIsolated(t *testing.T) {
 	}
 }
 
+// 改密锁与登录锁应作用域隔离（ADR-0015）：一方触顶不应锁定另一方，
+// 且一方成功清零不应解锁另一方——防交叉污染与「改密成功顺带解登录锁」。
+func TestRateLimiter_ScopeIsolation(t *testing.T) {
+	rl, _ := newTestRateLimiter(t)
+	ctx := context.Background()
+	const id, ip = "a@b.com", "1.2.3.4"
+
+	// 登录侧打满锁定。
+	for i := 0; i < 5; i++ {
+		_ = rl.RecordFailure(ctx, ScopeLogin, id, ip)
+	}
+	if locked, _ := rl.IsLocked(ctx, ScopeLogin, id, ip); !locked {
+		t.Fatal("login 作用域应已锁定")
+	}
+	// pwreset 作用域不应被登录失败连带锁定。
+	if locked, _ := rl.IsLocked(ctx, ScopePasswordReset, id, ip); locked {
+		t.Error("login 失败不应锁定 pwreset 作用域")
+	}
+
+	// 改密成功清零 pwreset 不应解锁 login。
+	if err := rl.ResetFailures(ctx, ScopePasswordReset, id, ip); err != nil {
+		t.Fatalf("ResetFailures 失败: %v", err)
+	}
+	if locked, _ := rl.IsLocked(ctx, ScopeLogin, id, ip); !locked {
+		t.Error("清零 pwreset 不应解锁 login 作用域")
+	}
+}
+
 func TestRateLimiter_SendQuota(t *testing.T) {
 	rl, h := newTestRateLimiter(t)
 	ctx := context.Background()

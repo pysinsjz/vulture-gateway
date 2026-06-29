@@ -31,14 +31,15 @@ func NewOTPService(otp *auth.OTPStore, limiter *auth.RateLimiter, senders map[st
 	return &OTPService{otp: otp, limiter: limiter, senders: senders}
 }
 
-// SendCode 向 dest 下发某渠道的验证码。先过重发间隔与配额限流，再生成并发送。
-func (s *OTPService) SendCode(ctx context.Context, channel, dest, ip string) error {
+// SendCode 向 dest 下发某用途某渠道的验证码。先过（按用途独立的）重发间隔与（按 dest+IP 共享的）
+// 配额限流，再生成并发送。purpose 缺省为 login（向后兼容，登录侧行为不变）。
+func (s *OTPService) SendCode(ctx context.Context, channel, dest, ip string, purpose ...auth.Purpose) error {
 	sender, ok := s.senders[channel]
 	if !ok {
 		return ErrUnknownChannel
 	}
 
-	can, err := s.otp.CanResend(ctx, dest)
+	can, err := s.otp.CanResend(ctx, dest, purpose...)
 	if err != nil {
 		return fmt.Errorf("检查重发间隔失败: %w", err)
 	}
@@ -54,7 +55,7 @@ func (s *OTPService) SendCode(ctx context.Context, channel, dest, ip string) err
 		return ErrSendRateLimited
 	}
 
-	code, err := s.otp.Issue(ctx, dest)
+	code, err := s.otp.Issue(ctx, dest, purpose...)
 	if err != nil {
 		return fmt.Errorf("生成验证码失败: %w", err)
 	}

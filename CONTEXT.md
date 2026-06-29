@@ -40,6 +40,10 @@ _Avoid_: change password, update password, forgot password
 A one-time, short-lived token that binds a signed-in Desktop Agent to the Gateway-hosted password page, proving which User without the user re-entering an identifier. Minted by an authenticated Gateway call and consumed once when the page opens. Distinct from the code-proven path a signed-out user takes from the login page's "forgot password" link.
 _Avoid_: reset token, magic link, deep link
 
+**OTP Purpose**:
+The use a one-time code is scoped to — `login` or `pwreset` — namespacing its Redis keys so a code issued for one cannot verify the other. Resend cooldown and attempt count are independent per purpose, and the brute-force lock counter is likewise namespaced so a login lockout and a password-change lockout never bleed into each other. Login defaults to `login` and is unchanged. Reset (changing an existing Password Credential) always requires a `pwreset` code as second-factor confirmation, even for a signed-in user, so a hijacked session alone can't take over the password.
+_Avoid_: code type, code kind, scope
+
 **Device**:
 An authorized Desktop Agent installation bound to a User. Each authorization creates one Device, which holds the long-lived credential and can be viewed and revoked individually.
 _Avoid_: session, client, installation

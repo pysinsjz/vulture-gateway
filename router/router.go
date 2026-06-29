@@ -56,9 +56,10 @@ func NewRouter(
 		oauthGroup.GET("/login", login.LoginPage)
 		oauthGroup.POST("/login", login.Login)
 		oauthGroup.POST("/send-code", login.SendCode)
-		// 网关托管设密码页（ADR-0015 / #39，绑定路径）：渲染 + 提交（页面作用域，靠 t + CSRF，不走 JWTAuth）。
+		// 网关托管设/改密页（ADR-0015 / #39、#40）：渲染 + 提交 + 改密发码（页面作用域，靠 t + CSRF，不走 JWTAuth）。
 		oauthGroup.GET("/password", password.PasswordPage)
 		oauthGroup.POST("/password", password.SubmitPassword)
+		oauthGroup.POST("/password/send-code", password.SendResetCode) // 改密 pwreset 发码，靠 t 授权
 	}
 
 	v1 := r.Group("/api/v1")

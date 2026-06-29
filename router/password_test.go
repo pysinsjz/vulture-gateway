@@ -58,10 +58,16 @@ func newPasswordEngine(t *testing.T, idRepo *memIdentityRepo) (*gin.Engine, *min
 			PasswordLinkTTL: 5 * time.Minute,
 		},
 		Auth: config.AuthConfig{
-			RSAPrivateKeyPEM: privPEM,
-			BcryptCost:       4, // 测试用低 cost 提速
-			CSRFTTL:          10 * time.Minute,
-			OTPTTL:           5 * time.Minute,
+			RSAPrivateKeyPEM:  privPEM,
+			BcryptCost:        4, // 测试用低 cost 提速
+			CSRFTTL:           10 * time.Minute,
+			OTPTTL:            5 * time.Minute,
+			OTPResendInterval: 60 * time.Second,
+			OTPMaxAttempts:    5,
+			LoginMaxFailures:  5,
+			LoginLockWindow:   15 * time.Minute,
+			SendMax:           5,
+			SendWindow:        time.Hour,
 		},
 		ClawHub:  config.ClawHubConfig{BaseURL: "http://127.0.0.1:1", Timeout: 5 * time.Second},
 		LLM:      config.LLMConfig{BaseURL: "http://127.0.0.1:1", MasterKey: "test-master", Timeout: 5 * time.Second},
@@ -345,23 +351,230 @@ func TestSetPassword_OAuthOnly_Friendly(t *testing.T) {
 	}
 }
 
-// ---- 改密（secret 非空）不在本切片范围：拒绝 ----
+// ---- 改密（secret 非空）：需验证码二次确认（#40） ----
 
-func TestSetPassword_AlreadySet_OutOfScope(t *testing.T) {
+// pwresetCode 从 miniredis 直读某 dest 的 pwreset 验证码（绕过 stub sender 取真实码）。
+func pwresetCode(t *testing.T, mr *miniredis.Miniredis, dest string) string {
+	t.Helper()
+	code, err := mr.Get("otp:pwreset:code:" + dest)
+	if err != nil || code == "" {
+		t.Fatalf("未能读取 pwreset 码 (dest=%s): %v", dest, err)
+	}
+	return code
+}
+
+// loginCodeOf 从 miniredis 直读某 dest 的 login 验证码（用于用途隔离反例）。
+func loginCodeOf(t *testing.T, mr *miniredis.Miniredis, dest string) string {
+	t.Helper()
+	code, err := mr.Get("otp:login:code:" + dest)
+	if err != nil || code == "" {
+		t.Fatalf("未能读取 login 码 (dest=%s): %v", dest, err)
+	}
+	return code
+}
+
+// setInitialPwd 经 #39 绑定路径为该 User 设置首个密码（使其 secret 非空，进入改密态）。
+func setInitialPwd(t *testing.T, e *gin.Engine, pub *rsa.PublicKey, userUUID, devID, pwd string) {
+	t.Helper()
+	tok := mintLink(t, e, issueViaScaffold(t, e, userUUID, devID))
+	csrf := extractCSRF(t, do(t, e, http.MethodGet, "/oauth/password?t="+url.QueryEscape(tok), "", nil).Body.String())
+	rec := doForm(t, e, http.MethodPost, "/oauth/password", "", url.Values{
+		"t":                  {tok},
+		"csrf":               {csrf},
+		"encrypted_password": {encryptRSA(t, pub, pwd)},
+	})
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "设置成功") {
+		t.Fatalf("前置设初始密码失败: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// resetPageCSRF 铸新链并取改密页 csrf；同时断言改密页处于「需验证码」模式。
+func resetPageCSRF(t *testing.T, e *gin.Engine, userUUID, devID string) (tok, csrf string) {
+	t.Helper()
+	tok = mintLink(t, e, issueViaScaffold(t, e, userUUID, devID))
+	page := do(t, e, http.MethodGet, "/oauth/password?t="+url.QueryEscape(tok), "", nil)
+	if page.Code != http.StatusOK {
+		t.Fatalf("改密页期望 200, 实际 %d: %s", page.Code, page.Body.String())
+	}
+	body := page.Body.String()
+	if !strings.Contains(body, "发送验证码") {
+		t.Fatalf("已设密码账号的改密页应为验证码模式（含发送验证码）, 实际: %s", body)
+	}
+	return tok, extractCSRF(t, body)
+}
+
+func TestResetPassword_RequiresCode_AndLoginRoundTrip(t *testing.T) {
 	idRepo := newMemIdentityRepo()
-	idRepo.seed(&model.Identity{UUID: "idn_e", UserUUID: "usr_s", Type: model.IdentityTypeEmail, Identifier: "s@x.com", Secret: "existing-hash"})
-	e, _, _ := newPasswordEngine(t, idRepo)
+	idRepo.seed(&model.Identity{UUID: "idn_e", UserUUID: "usr_r", Type: model.IdentityTypeEmail, Identifier: "r@x.com"})
+	idRepo.seed(&model.Identity{UUID: "idn_p", UserUUID: "usr_r", Type: model.IdentityTypePhone, Identifier: "13900000000"})
+	e, mr, priv := newPasswordEngine(t, idRepo)
+	pub := &priv.PublicKey
 
-	tok := mintLink(t, e, issueViaScaffold(t, e, "usr_s", "dev_s"))
+	const oldPassword = "oldpass123"
+	const newPassword = "newpass456"
+	setInitialPwd(t, e, pub, "usr_r", "dev_r", oldPassword)
 
-	// GET：已设密码 → 失效页（首设入口对其不可用）。
-	getRec := do(t, e, http.MethodGet, "/oauth/password?t="+url.QueryEscape(tok), "", nil)
-	if getRec.Code != http.StatusBadRequest || !strings.Contains(getRec.Body.String(), "已设置密码") {
-		t.Fatalf("已设密码 GET 期望 400 提示改密未开放, 实际 %d: %s", getRec.Code, getRec.Body.String())
+	tok, csrf := resetPageCSRF(t, e, "usr_r", "dev_r")
+
+	// 发改密验证码（页面作用域，靠 t 授权，非 Bearer）。
+	scRec := doForm(t, e, http.MethodPost, "/oauth/password/send-code", "", url.Values{"t": {tok}})
+	if scRec.Code != http.StatusOK {
+		t.Fatalf("发改密码期望 200, 实际 %d: %s", scRec.Code, scRec.Body.String())
+	}
+	code := pwresetCode(t, mr, "r@x.com")
+
+	// 正确码 → 改密成功，账号级写入（email 与 phone 同步更新为新 hash）。
+	setRec := doForm(t, e, http.MethodPost, "/oauth/password", "", url.Values{
+		"t":                  {tok},
+		"csrf":               {csrf},
+		"encrypted_password": {encryptRSA(t, pub, newPassword)},
+		"code":               {code},
+	})
+	if setRec.Code != http.StatusOK || !strings.Contains(setRec.Body.String(), "成功") {
+		t.Fatalf("改密期望成功页 200, 实际 %d: %s", setRec.Code, setRec.Body.String())
+	}
+	if idRepo.secretOf(model.IdentityTypeEmail, "r@x.com") != idRepo.secretOf(model.IdentityTypePhone, "13900000000") {
+		t.Error("账号级改密：email 与 phone 应写入同一新 hash")
 	}
 
-	// 既有 secret 不被改动。
-	if idRepo.secretOf(model.IdentityTypeEmail, "s@x.com") != "existing-hash" {
-		t.Error("首设入口不应改动已有密码")
+	// 端到端回路：新密码登录成功、旧密码登录失败。
+	lk := authorizeAndGetLinkedState(t, e)
+	loginCSRF := extractCSRF(t, do(t, e, http.MethodGet, "/oauth/login?lk="+url.QueryEscape(lk), "", nil).Body.String())
+	okLogin := doForm(t, e, http.MethodPost, "/oauth/login", "", url.Values{
+		"lk": {lk}, "method": {"password"}, "identifier": {"r@x.com"},
+		"credential": {encryptRSA(t, pub, newPassword)}, "csrf": {loginCSRF},
+	})
+	if okLogin.Code != http.StatusFound {
+		t.Fatalf("新密码登录期望 302, 实际 %d: %s", okLogin.Code, okLogin.Body.String())
+	}
+
+	lk2 := authorizeAndGetLinkedState(t, e)
+	loginCSRF2 := extractCSRF(t, do(t, e, http.MethodGet, "/oauth/login?lk="+url.QueryEscape(lk2), "", nil).Body.String())
+	badLogin := doForm(t, e, http.MethodPost, "/oauth/login", "", url.Values{
+		"lk": {lk2}, "method": {"password"}, "identifier": {"r@x.com"},
+		"credential": {encryptRSA(t, pub, oldPassword)}, "csrf": {loginCSRF2},
+	})
+	if badLogin.Code == http.StatusFound {
+		t.Fatalf("旧密码登录应失败（非 302），实际 302 成功")
+	}
+}
+
+func TestResetPassword_SendCode_ResendCooldown(t *testing.T) {
+	idRepo := newMemIdentityRepo()
+	idRepo.seed(&model.Identity{UUID: "idn_e", UserUUID: "usr_c", Type: model.IdentityTypeEmail, Identifier: "c@x.com"})
+	e, _, priv := newPasswordEngine(t, idRepo)
+	setInitialPwd(t, e, &priv.PublicKey, "usr_c", "dev_c", "oldpass123")
+
+	tok, _ := resetPageCSRF(t, e, "usr_c", "dev_c")
+
+	// 首发成功。
+	if rec := doForm(t, e, http.MethodPost, "/oauth/password/send-code", "", url.Values{"t": {tok}}); rec.Code != http.StatusOK {
+		t.Fatalf("首发改密码期望 200, 实际 %d: %s", rec.Code, rec.Body.String())
+	}
+	// 60s 内立即重发 → 429（重发冷却生效，pwreset 用途独立闸）。
+	if rec := doForm(t, e, http.MethodPost, "/oauth/password/send-code", "", url.Values{"t": {tok}}); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("60s 内重发期望 429, 实际 %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestResetPassword_MissingOrWrongCode_Rejected(t *testing.T) {
+	idRepo := newMemIdentityRepo()
+	idRepo.seed(&model.Identity{UUID: "idn_e", UserUUID: "usr_m", Type: model.IdentityTypeEmail, Identifier: "m@x.com"})
+	e, mr, priv := newPasswordEngine(t, idRepo)
+	pub := &priv.PublicKey
+	setInitialPwd(t, e, pub, "usr_m", "dev_m", "oldpass123")
+	oldHash := idRepo.secretOf(model.IdentityTypeEmail, "m@x.com")
+
+	// 缺码：被拒，secret 不变。
+	tok, csrf := resetPageCSRF(t, e, "usr_m", "dev_m")
+	miss := doForm(t, e, http.MethodPost, "/oauth/password", "", url.Values{
+		"t": {tok}, "csrf": {csrf}, "encrypted_password": {encryptRSA(t, pub, "newpass456")},
+	})
+	if strings.Contains(miss.Body.String(), "成功") {
+		t.Fatalf("缺码不应成功: %s", miss.Body.String())
+	}
+	if !strings.Contains(miss.Body.String(), "验证码") {
+		t.Errorf("缺码应提示需验证码, 实际: %s", miss.Body.String())
+	}
+	if idRepo.secretOf(model.IdentityTypeEmail, "m@x.com") != oldHash {
+		t.Error("缺码被拒后 secret 不应改动")
+	}
+
+	// 错码：被拒，secret 不变（发码后用错码）。
+	tok2, csrf2 := resetPageCSRF(t, e, "usr_m", "dev_m")
+	if rec := doForm(t, e, http.MethodPost, "/oauth/password/send-code", "", url.Values{"t": {tok2}}); rec.Code != http.StatusOK {
+		t.Fatalf("发码期望 200, 实际 %d", rec.Code)
+	}
+	_ = pwresetCode(t, mr, "m@x.com") // 确有真实码存在
+	wrong := doForm(t, e, http.MethodPost, "/oauth/password", "", url.Values{
+		"t": {tok2}, "csrf": {csrf2}, "encrypted_password": {encryptRSA(t, pub, "newpass456")}, "code": {"000000"},
+	})
+	if strings.Contains(wrong.Body.String(), "成功") {
+		t.Fatalf("错码不应成功: %s", wrong.Body.String())
+	}
+	if idRepo.secretOf(model.IdentityTypeEmail, "m@x.com") != oldHash {
+		t.Error("错码被拒后 secret 不应改动")
+	}
+}
+
+func TestResetPassword_PurposeIsolation_LoginCodeRejected(t *testing.T) {
+	idRepo := newMemIdentityRepo()
+	idRepo.seed(&model.Identity{UUID: "idn_e", UserUUID: "usr_i", Type: model.IdentityTypeEmail, Identifier: "i@x.com"})
+	e, mr, priv := newPasswordEngine(t, idRepo)
+	pub := &priv.PublicKey
+	setInitialPwd(t, e, pub, "usr_i", "dev_i", "oldpass123")
+	oldHash := idRepo.secretOf(model.IdentityTypeEmail, "i@x.com")
+
+	// 为 i@x.com 取一枚 login 用途的验证码（经登录页发码端点）。
+	lk := authorizeAndGetLinkedState(t, e)
+	if rec := doForm(t, e, http.MethodPost, "/oauth/send-code", "", url.Values{
+		"lk": {lk}, "method": {"email_code"}, "identifier": {"i@x.com"},
+	}); rec.Code != http.StatusOK {
+		t.Fatalf("登录发码期望 200, 实际 %d: %s", rec.Code, rec.Body.String())
+	}
+	loginCode := loginCodeOf(t, mr, "i@x.com")
+
+	// 用 login 码去改密：用途隔离 → 应被拒，secret 不变。
+	tok, csrf := resetPageCSRF(t, e, "usr_i", "dev_i")
+	rec := doForm(t, e, http.MethodPost, "/oauth/password", "", url.Values{
+		"t": {tok}, "csrf": {csrf}, "encrypted_password": {encryptRSA(t, pub, "newpass456")}, "code": {loginCode},
+	})
+	if strings.Contains(rec.Body.String(), "成功") {
+		t.Fatalf("login 码不应能用于 pwreset 改密: %s", rec.Body.String())
+	}
+	if idRepo.secretOf(model.IdentityTypeEmail, "i@x.com") != oldHash {
+		t.Error("用途隔离拒绝后 secret 不应改动")
+	}
+}
+
+func TestResetPassword_RateLimitLock(t *testing.T) {
+	idRepo := newMemIdentityRepo()
+	idRepo.seed(&model.Identity{UUID: "idn_e", UserUUID: "usr_l", Type: model.IdentityTypeEmail, Identifier: "l@x.com"})
+	e, _, priv := newPasswordEngine(t, idRepo)
+	pub := &priv.PublicKey
+	setInitialPwd(t, e, pub, "usr_l", "dev_l", "oldpass123")
+	oldHash := idRepo.secretOf(model.IdentityTypeEmail, "l@x.com")
+
+	// 连续 5 次错码（LoginMaxFailures=5）→ 触顶锁定。
+	for i := 0; i < 5; i++ {
+		tok, csrf := resetPageCSRF(t, e, "usr_l", "dev_l")
+		doForm(t, e, http.MethodPost, "/oauth/password", "", url.Values{
+			"t": {tok}, "csrf": {csrf}, "encrypted_password": {encryptRSA(t, pub, "newpass456")}, "code": {"000000"},
+		})
+	}
+
+	// 触顶后即便给「会成功的」上下文也应被锁定拒绝，secret 始终不变。
+	tok, csrf := resetPageCSRF(t, e, "usr_l", "dev_l")
+	locked := doForm(t, e, http.MethodPost, "/oauth/password", "", url.Values{
+		"t": {tok}, "csrf": {csrf}, "encrypted_password": {encryptRSA(t, pub, "newpass456")}, "code": {"000000"},
+	})
+	if strings.Contains(locked.Body.String(), "成功") {
+		t.Fatalf("锁定后不应成功: %s", locked.Body.String())
+	}
+	if !strings.Contains(locked.Body.String(), "频繁") {
+		t.Errorf("锁定后应提示尝试过于频繁, 实际: %s", locked.Body.String())
+	}
+	if idRepo.secretOf(model.IdentityTypeEmail, "l@x.com") != oldHash {
+		t.Error("锁定全程 secret 不应改动")
 	}
 }

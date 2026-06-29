@@ -20,6 +20,7 @@ import (
 // 关键约束：托管页跑在系统浏览器、无桌面 Bearer，故页面作用域端点不走 JWTAuth，靠 t + 一次性 CSRF 授权。
 type PasswordHandler struct {
 	pwService   *service.PasswordService
+	otpSvc      *service.OTPService
 	links       *auth.PasswordLinkStore
 	csrf        *auth.CSRFStore
 	rsa         *auth.RSADecryptor
@@ -28,9 +29,11 @@ type PasswordHandler struct {
 	resultTmpl  *template.Template
 }
 
-// NewPasswordHandler 构造设密码 handler。gatewayBase 为网关外部基址（拼托管页 URL）。
+// NewPasswordHandler 构造设密码 handler。gatewayBase 为网关外部基址（拼托管页 URL）；
+// otpSvc 供改密路径页面作用域发码（POST /oauth/password/send-code，purpose=pwreset）。
 func NewPasswordHandler(
 	pwService *service.PasswordService,
+	otpSvc *service.OTPService,
 	links *auth.PasswordLinkStore,
 	csrf *auth.CSRFStore,
 	rsa *auth.RSADecryptor,
@@ -38,6 +41,7 @@ func NewPasswordHandler(
 ) *PasswordHandler {
 	return &PasswordHandler{
 		pwService:   pwService,
+		otpSvc:      otpSvc,
 		links:       links,
 		csrf:        csrf,
 		rsa:         rsa,
@@ -56,6 +60,7 @@ type passwordFormData struct {
 	CSRFToken    string
 	PublicKeyB64 string
 	Identifier   string
+	RequireCode  bool // true=改密（验证码模式，渲染发码按钮+验证码输入）；false=首设（免码）
 	Error        string
 }
 
@@ -104,13 +109,48 @@ func (h *PasswordHandler) PasswordPage(c *gin.Context) {
 	h.renderForm(c, token, link.UserUUID, "")
 }
 
-// SubmitPassword 处理设密码提交：校验 t/CSRF → 解密 → 校验策略 → 账号级写入 → 成功消费 t。
+// SendResetCode 改密路径页面作用域发码（purpose=pwreset）：靠 t 定位账号自有标识，非 Bearer。
+//
+//	POST /oauth/password/send-code  (公开)
+func (h *PasswordHandler) SendResetCode(c *gin.Context) {
+	token := c.PostForm("t")
+	link, found, err := h.links.Peek(c.Request.Context(), token)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, sendCodeResponse{Error: "发送失败，请稍后重试"})
+		return
+	}
+	if !found {
+		c.JSON(http.StatusBadRequest, sendCodeResponse{Error: "链接已失效，请重新发起"})
+		return
+	}
+
+	dest, channel, err := h.pwService.ResetChannel(c.Request.Context(), link.UserUUID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, sendCodeResponse{Error: "当前账号没有可发送验证码的邮箱/手机标识"})
+		return
+	}
+
+	switch err := h.otpSvc.SendCode(c.Request.Context(), channel, dest, c.ClientIP(), auth.PurposePasswordReset); {
+	case err == nil:
+		c.JSON(http.StatusOK, sendCodeResponse{OK: true})
+	case errors.Is(err, service.ErrResendTooSoon):
+		c.JSON(http.StatusTooManyRequests, sendCodeResponse{Error: "发送过于频繁，请稍后再试"})
+	case errors.Is(err, service.ErrSendRateLimited):
+		c.JSON(http.StatusTooManyRequests, sendCodeResponse{Error: "发送次数过多，请稍后再试"})
+	default:
+		c.JSON(http.StatusInternalServerError, sendCodeResponse{Error: "发送失败，请稍后重试"})
+	}
+}
+
+// SubmitPassword 处理设/改密提交：校验 t/CSRF → 依 secret 状态分派首设（免码）或改密（验证码）→
+// 账号级写入 → 成功消费 t。
 //
 //	POST /oauth/password  (公开)
 func (h *PasswordHandler) SubmitPassword(c *gin.Context) {
 	token := c.PostForm("t")
 	csrfToken := c.PostForm("csrf")
 	encrypted := c.PostForm("encrypted_password")
+	code := c.PostForm("code")
 
 	// 先 Peek（不消费）确认链接有效，定位账号。成功写入后才 Take 消费（单次有效）。
 	link, found, err := h.links.Peek(c.Request.Context(), token)
@@ -129,12 +169,38 @@ func (h *PasswordHandler) SubmitPassword(c *gin.Context) {
 		return
 	}
 
-	err = h.pwService.SetInitialPassword(c.Request.Context(), link.UserUUID, encrypted)
+	// 依 secret 状态分派：secret 空→首设（免码）；secret 非空→改密（需 pwreset 验证码）。
+	binding, err := h.pwService.Binding(c.Request.Context(), link.UserUUID)
+	switch {
+	case errors.Is(err, service.ErrNoLocalIdentity):
+		h.renderResult(c, http.StatusBadRequest, "无法设置密码", "当前账号没有可设置密码的邮箱/手机标识。")
+		return
+	case err != nil:
+		h.renderResult(c, http.StatusInternalServerError, "设置密码", "提交处理出错，请稍后重试。")
+		return
+	}
+
+	if binding.CanSet {
+		err = h.pwService.SetInitialPassword(c.Request.Context(), link.UserUUID, encrypted)
+	} else {
+		err = h.pwService.ResetPassword(c.Request.Context(), link.UserUUID, encrypted, code, c.ClientIP())
+	}
+
 	switch {
 	case err == nil:
-		// 设置成功：消费链接（单次有效、防重放），渲染成功页。
+		// 成功：消费链接（单次有效、防重放），渲染成功页。
 		_, _, _ = h.links.Take(c.Request.Context(), token)
-		h.renderResult(c, http.StatusOK, "设置成功", "密码已设置，现在可以用新密码登录了。")
+		if binding.CanSet {
+			h.renderResult(c, http.StatusOK, "设置成功", "密码已设置，现在可以用新密码登录了。")
+		} else {
+			h.renderResult(c, http.StatusOK, "修改成功", "密码已修改，现在可以用新密码登录了。")
+		}
+	case errors.Is(err, service.ErrResetLocked):
+		h.renderForm(c, token, link.UserUUID, "尝试过于频繁，请稍后再试。")
+	case errors.Is(err, service.ErrResetCodeRequired):
+		h.renderForm(c, token, link.UserUUID, "请输入邮箱/手机验证码。")
+	case errors.Is(err, service.ErrResetCodeInvalid):
+		h.renderForm(c, token, link.UserUUID, "验证码错误或已失效，请重试。")
 	case errors.Is(err, auth.ErrPasswordTooShort), errors.Is(err, auth.ErrPasswordTooLong):
 		h.renderForm(c, token, link.UserUUID, "密码须为 8–64 个字符。")
 	case errors.Is(err, auth.ErrPasswordMissingKind):
@@ -142,7 +208,8 @@ func (h *PasswordHandler) SubmitPassword(c *gin.Context) {
 	case errors.Is(err, service.ErrInvalidCiphertext):
 		h.renderForm(c, token, link.UserUUID, "密码提交无效，请重试。")
 	case errors.Is(err, service.ErrPasswordAlreadySet):
-		h.renderResult(c, http.StatusBadRequest, "无法设置密码", "账号已设置密码；如需修改，请使用验证码方式（暂未开放）。")
+		// 并发：Peek 后被他途设密码。回渲表单（此时已转为改密模式）。
+		h.renderForm(c, token, link.UserUUID, "账号状态已变化，请重试。")
 	case errors.Is(err, service.ErrNoLocalIdentity):
 		h.renderResult(c, http.StatusBadRequest, "无法设置密码", "当前账号没有可设置密码的邮箱/手机标识。")
 	default:
@@ -150,8 +217,9 @@ func (h *PasswordHandler) SubmitPassword(c *gin.Context) {
 	}
 }
 
-// renderForm 校验绑定上下文 → 签发新 CSRF → 渲染设密码表单（可带错误提示）。
-// 已设密码 / 无本地标识 / 系统错误时转渲终态结果页。
+// renderForm 校验绑定上下文 → 签发新 CSRF → 渲染设/改密表单（可带错误提示）。
+// secret 空 → 首设模式（免码）；secret 非空 → 改密模式（RequireCode，渲染发码按钮）。
+// 无本地标识 / 系统错误时转渲终态结果页。
 func (h *PasswordHandler) renderForm(c *gin.Context, token, userUUID, errMsg string) {
 	binding, err := h.pwService.Binding(c.Request.Context(), userUUID)
 	switch {
@@ -160,10 +228,6 @@ func (h *PasswordHandler) renderForm(c *gin.Context, token, userUUID, errMsg str
 		return
 	case err != nil:
 		h.renderResult(c, http.StatusInternalServerError, "设置密码", "页面初始化失败，请稍后重试。")
-		return
-	}
-	if !binding.CanSet {
-		h.renderResult(c, http.StatusBadRequest, "无法设置密码", "账号已设置密码；如需修改，请使用验证码方式（暂未开放）。")
 		return
 	}
 
@@ -185,6 +249,7 @@ func (h *PasswordHandler) renderForm(c *gin.Context, token, userUUID, errMsg str
 		CSRFToken:    csrfToken,
 		PublicKeyB64: pubB64,
 		Identifier:   binding.Identifier,
+		RequireCode:  !binding.CanSet,
 		Error:        errMsg,
 	})
 }

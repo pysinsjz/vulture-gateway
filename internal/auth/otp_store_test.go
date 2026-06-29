@@ -82,6 +82,65 @@ func TestOTPStore_BypassDisabledWhenEmpty(t *testing.T) {
 	}
 }
 
+func TestOTPStore_PurposeIsolation(t *testing.T) {
+	store, _ := newTestOTPStore(t)
+	ctx := context.Background()
+
+	// 为 login 用途下发码：必须只在 login 命名空间内可验，pwreset 命名空间查不到。
+	loginCode, err := store.Issue(ctx, "a@b.com", PurposeLogin)
+	if err != nil {
+		t.Fatalf("login Issue 失败: %v", err)
+	}
+	if ok, _ := store.Verify(ctx, "a@b.com", loginCode, PurposePasswordReset); ok {
+		t.Error("login 用途的码不应能用于 pwreset 校验（用途隔离）")
+	}
+	if ok, _ := store.Verify(ctx, "a@b.com", loginCode, PurposeLogin); !ok {
+		t.Error("login 用途的码应能在 login 命名空间校验通过")
+	}
+
+	// 为 pwreset 用途下发码：同理，不可用于 login。
+	resetCode, err := store.Issue(ctx, "a@b.com", PurposePasswordReset)
+	if err != nil {
+		t.Fatalf("pwreset Issue 失败: %v", err)
+	}
+	if ok, _ := store.Verify(ctx, "a@b.com", resetCode, PurposeLogin); ok {
+		t.Error("pwreset 用途的码不应能用于 login 校验（用途隔离）")
+	}
+	if ok, _ := store.Verify(ctx, "a@b.com", resetCode, PurposePasswordReset); !ok {
+		t.Error("pwreset 用途的码应能在 pwreset 命名空间校验通过")
+	}
+}
+
+func TestOTPStore_PurposeIndependentResend(t *testing.T) {
+	store, _ := newTestOTPStore(t)
+	ctx := context.Background()
+
+	// login 下发置起其重发闸，但不应影响 pwreset 的重发判定（各用途独立）。
+	if _, err := store.Issue(ctx, "a@b.com", PurposeLogin); err != nil {
+		t.Fatalf("login Issue 失败: %v", err)
+	}
+	if can, _ := store.CanResend(ctx, "a@b.com", PurposeLogin); can {
+		t.Error("login 刚发码，login 用途重发间隔内不应允许重发")
+	}
+	if can, _ := store.CanResend(ctx, "a@b.com", PurposePasswordReset); !can {
+		t.Error("pwreset 用途重发闸应独立，未发码时应允许发送")
+	}
+}
+
+func TestOTPStore_DefaultPurposeIsLogin(t *testing.T) {
+	store, _ := newTestOTPStore(t)
+	ctx := context.Background()
+
+	// 不显式传 purpose（向后兼容）应等价于 login：默认下发的码可用显式 login 校验。
+	code, err := store.Issue(ctx, "a@b.com")
+	if err != nil {
+		t.Fatalf("Issue 失败: %v", err)
+	}
+	if ok, _ := store.Verify(ctx, "a@b.com", code, PurposeLogin); !ok {
+		t.Error("默认 purpose 应为 login：默认下发的码应能以显式 login 校验")
+	}
+}
+
 func TestOTPStore_VerifyWrong(t *testing.T) {
 	store, _ := newTestOTPStore(t)
 	ctx := context.Background()
