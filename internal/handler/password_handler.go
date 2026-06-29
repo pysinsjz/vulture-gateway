@@ -9,6 +9,7 @@ import (
 
 	"github.com/pysinsjz/vulture-gateway/internal/auth"
 	"github.com/pysinsjz/vulture-gateway/internal/middleware"
+	"github.com/pysinsjz/vulture-gateway/internal/pkg/idgen"
 	"github.com/pysinsjz/vulture-gateway/internal/service"
 )
 
@@ -26,6 +27,7 @@ type PasswordHandler struct {
 	rsa         *auth.RSADecryptor
 	gatewayBase string
 	formTmpl    *template.Template
+	codeTmpl    *template.Template
 	resultTmpl  *template.Template
 }
 
@@ -47,6 +49,7 @@ func NewPasswordHandler(
 		rsa:         rsa,
 		gatewayBase: gatewayBase,
 		formTmpl:    template.Must(template.New("pwForm").Parse(passwordPageTmpl)),
+		codeTmpl:    template.Must(template.New("pwCodeForm").Parse(passwordCodePageTmpl)),
 		resultTmpl:  template.Must(template.New("pwResult").Parse(passwordResultTmpl)),
 	}
 }
@@ -61,6 +64,16 @@ type passwordFormData struct {
 	PublicKeyB64 string
 	Identifier   string
 	RequireCode  bool // true=改密（验证码模式，渲染发码按钮+验证码输入）；false=首设（免码）
+	Error        string
+}
+
+// passwordCodeFormData 是登出态忘记密码（验证码模式）页的渲染数据。SID 为页面一次性会话 id，
+// CSRF token 绑定其上：授权页面作用域的发码/提交。Identifier 在错误重渲时回填（少让用户重输）。
+type passwordCodeFormData struct {
+	SID          string
+	CSRFToken    string
+	PublicKeyB64 string
+	Identifier   string
 	Error        string
 }
 
@@ -93,8 +106,8 @@ func (h *PasswordHandler) PasswordLink(c *gin.Context) {
 func (h *PasswordHandler) PasswordPage(c *gin.Context) {
 	token := c.Query("t")
 	if token == "" {
-		// 本切片（#39）只做绑定路径；登出态验证码模式留给 #41。无 t 引导回桌面端发起。
-		h.renderResult(c, http.StatusBadRequest, "无法设置密码", "请从桌面端「设置」中发起设置密码。")
+		// 无 t → 登出态忘记密码（验证码模式，#41）：自填标识 + pwreset 验证码证明身份。
+		h.renderCodeForm(c, "", "")
 		return
 	}
 	link, found, err := h.links.Peek(c.Request.Context(), token)
@@ -109,11 +122,17 @@ func (h *PasswordHandler) PasswordPage(c *gin.Context) {
 	h.renderForm(c, token, link.UserUUID, "")
 }
 
-// SendResetCode 改密路径页面作用域发码（purpose=pwreset）：靠 t 定位账号自有标识，非 Bearer。
+// SendResetCode 页面作用域发码（purpose=pwreset），非 Bearer：
+//   - 绑定路径（有 t）：靠 t 定位账号自有标识发码（#40）。
+//   - 忘记密码路径（无 t）：靠页面一次性 CSRF（绑定 sid）+ 提交的标识授权，向该标识发码（#41）。
 //
 //	POST /oauth/password/send-code  (公开)
 func (h *PasswordHandler) SendResetCode(c *gin.Context) {
 	token := c.PostForm("t")
+	if token == "" {
+		h.sendForgotCode(c)
+		return
+	}
 	link, found, err := h.links.Peek(c.Request.Context(), token)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, sendCodeResponse{Error: "发送失败，请稍后重试"})
@@ -148,6 +167,10 @@ func (h *PasswordHandler) SendResetCode(c *gin.Context) {
 //	POST /oauth/password  (公开)
 func (h *PasswordHandler) SubmitPassword(c *gin.Context) {
 	token := c.PostForm("t")
+	if token == "" {
+		h.submitForgotPassword(c)
+		return
+	}
 	csrfToken := c.PostForm("csrf")
 	encrypted := c.PostForm("encrypted_password")
 	code := c.PostForm("code")
@@ -250,6 +273,103 @@ func (h *PasswordHandler) renderForm(c *gin.Context, token, userUUID, errMsg str
 		PublicKeyB64: pubB64,
 		Identifier:   binding.Identifier,
 		RequireCode:  !binding.CanSet,
+		Error:        errMsg,
+	})
+}
+
+// sendForgotCode 登出态忘记密码路径发码（无 t）：页面 CSRF（绑定 sid，不消费）+ 标识授权 →
+// 向该标识发 pwreset 验证码。防枚举：与登录发码一致，不校验标识是否存在、不泄露存在性。
+func (h *PasswordHandler) sendForgotCode(c *gin.Context) {
+	sid := c.PostForm("sid")
+	csrfToken := c.PostForm("csrf")
+	identifier := c.PostForm("identifier")
+
+	// 页面 CSRF 校验但不消费：发码可重试，且其后表单提交仍需该 csrf（一次性消费留到提交）。
+	if ok, err := h.csrf.Validate(c.Request.Context(), sid, csrfToken); err != nil || !ok {
+		c.JSON(http.StatusBadRequest, sendCodeResponse{Error: "会话已失效，请刷新页面重试"})
+		return
+	}
+	if identifier == "" {
+		c.JSON(http.StatusBadRequest, sendCodeResponse{Error: "请输入邮箱或手机号"})
+		return
+	}
+
+	switch err := h.otpSvc.SendCode(c.Request.Context(), h.pwService.ChannelForIdentifier(identifier), identifier, c.ClientIP(), auth.PurposePasswordReset); {
+	case err == nil:
+		c.JSON(http.StatusOK, sendCodeResponse{OK: true})
+	case errors.Is(err, service.ErrResendTooSoon):
+		c.JSON(http.StatusTooManyRequests, sendCodeResponse{Error: "发送过于频繁，请稍后再试"})
+	case errors.Is(err, service.ErrSendRateLimited):
+		c.JSON(http.StatusTooManyRequests, sendCodeResponse{Error: "发送次数过多，请稍后再试"})
+	default:
+		c.JSON(http.StatusInternalServerError, sendCodeResponse{Error: "发送失败，请稍后重试"})
+	}
+}
+
+// submitForgotPassword 处理登出态忘记密码提交（无 t）：消费页面 CSRF → 标识 + pwreset 验证码证明身份 →
+// 依 secret 空/非空 set/reset → 账号级写入。失败回渲验证码模式页（回填标识、签发新 sid/csrf）。
+func (h *PasswordHandler) submitForgotPassword(c *gin.Context) {
+	sid := c.PostForm("sid")
+	csrfToken := c.PostForm("csrf")
+	identifier := c.PostForm("identifier")
+	code := c.PostForm("code")
+	encrypted := c.PostForm("encrypted_password")
+
+	// 一次性 CSRF：提交即消费（成败都会重渲新页/新 csrf）。
+	if ok, err := h.csrf.Consume(c.Request.Context(), sid, csrfToken); err != nil || !ok {
+		h.renderCodeForm(c, identifier, "会话已失效，请重试。")
+		return
+	}
+
+	firstSet, err := h.pwService.ForgotPassword(c.Request.Context(), identifier, code, encrypted, c.ClientIP())
+	switch {
+	case err == nil:
+		if firstSet {
+			h.renderResult(c, http.StatusOK, "设置成功", "密码已设置，现在可以用新密码登录了。")
+		} else {
+			h.renderResult(c, http.StatusOK, "重置成功", "密码已重置，现在可以用新密码登录了。")
+		}
+	case errors.Is(err, service.ErrResetLocked):
+		h.renderCodeForm(c, identifier, "尝试过于频繁，请稍后再试。")
+	case errors.Is(err, service.ErrResetCodeRequired):
+		h.renderCodeForm(c, identifier, "请输入邮箱/手机验证码。")
+	case errors.Is(err, service.ErrResetCodeInvalid):
+		h.renderCodeForm(c, identifier, "验证码错误或已失效，请重试。")
+	case errors.Is(err, auth.ErrPasswordTooShort), errors.Is(err, auth.ErrPasswordTooLong):
+		h.renderCodeForm(c, identifier, "密码须为 8–64 个字符。")
+	case errors.Is(err, auth.ErrPasswordMissingKind):
+		h.renderCodeForm(c, identifier, "密码须同时包含字母与数字。")
+	case errors.Is(err, service.ErrInvalidCiphertext):
+		h.renderCodeForm(c, identifier, "密码提交无效，请重试。")
+	case errors.Is(err, service.ErrNoLocalIdentity):
+		// 仅持有效码者（标识所有者）可达此分支，故友好告知不构成枚举（防枚举见 ForgotPassword）。
+		h.renderResult(c, http.StatusBadRequest, "无法设置密码", "该邮箱/手机号无法通过此方式设置密码。")
+	default:
+		h.renderResult(c, http.StatusInternalServerError, "重置密码", "重置密码出错，请稍后重试。")
+	}
+}
+
+// renderCodeForm 签发绑定新 sid 的一次性 CSRF → 渲染登出态忘记密码（验证码模式）页（可带错误提示、回填标识）。
+func (h *PasswordHandler) renderCodeForm(c *gin.Context, identifier, errMsg string) {
+	sid := idgen.New("pwsid")
+	csrfToken, err := h.csrf.Issue(c.Request.Context(), sid)
+	if err != nil {
+		h.renderResult(c, http.StatusInternalServerError, "重置密码", "页面初始化失败，请稍后重试。")
+		return
+	}
+	pubB64, err := spkiBase64(h.rsa.PublicKeyPEM())
+	if err != nil {
+		h.renderResult(c, http.StatusInternalServerError, "重置密码", "页面初始化失败，请稍后重试。")
+		return
+	}
+
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.Status(http.StatusOK)
+	_ = h.codeTmpl.Execute(c.Writer, passwordCodeFormData{
+		SID:          sid,
+		CSRFToken:    csrfToken,
+		PublicKeyB64: pubB64,
+		Identifier:   identifier,
 		Error:        errMsg,
 	})
 }

@@ -64,6 +64,38 @@ func TestCSRFStore_IssueConsumeOnce(t *testing.T) {
 	}
 }
 
+func TestCSRFStore_ValidateDoesNotConsume(t *testing.T) {
+	rdb, _ := testRedis(t)
+	store := NewCSRFStore(rdb, 10*time.Minute)
+	ctx := context.Background()
+
+	token, err := store.Issue(ctx, "sid1")
+	if err != nil || token == "" {
+		t.Fatalf("Issue 应返回非空 token: %v", err)
+	}
+
+	// Validate 可多次命中（不消费），供页面作用域子请求（如忘记密码发码）重试。
+	for i := 0; i < 2; i++ {
+		if ok, err := store.Validate(ctx, "sid1", token); err != nil || !ok {
+			t.Fatalf("第 %d 次 Validate 应命中, ok=%v err=%v", i+1, ok, err)
+		}
+	}
+	// 错误 token / 未知 sid 不命中。
+	if ok, _ := store.Validate(ctx, "sid1", "wrong"); ok {
+		t.Error("错误 token 的 Validate 不应命中")
+	}
+	if ok, _ := store.Validate(ctx, "nope", token); ok {
+		t.Error("未知 sid 的 Validate 不应命中")
+	}
+	// Validate 之后仍可 Consume（最终提交一次性消费）。
+	if ok, _ := store.Consume(ctx, "sid1", token); !ok {
+		t.Error("Validate 后 Consume 仍应命中")
+	}
+	if ok, _ := store.Validate(ctx, "sid1", token); ok {
+		t.Error("Consume 消费后 Validate 不应再命中")
+	}
+}
+
 func TestCSRFStore_WrongToken(t *testing.T) {
 	rdb, _ := testRedis(t)
 	store := NewCSRFStore(rdb, 10*time.Minute)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/pysinsjz/vulture-gateway/internal/auth"
 	"github.com/pysinsjz/vulture-gateway/internal/dao"
@@ -178,6 +179,81 @@ func (s *PasswordService) ResetPassword(ctx context.Context, userUUID, encrypted
 	return nil
 }
 
+// ForgotPassword 执行登出态「忘记密码」设/重置（ADR-0015 / #41）：用 identifier + pwreset 验证码
+// 证明身份后写账号级密码。登出态一律需验证码（无 Bearer、无 Password Link），set/reset 由该 User 的
+// secret 空/非空派生——仅影响调用方的成功语义，验证码闸两者皆同。
+//
+// 防账号枚举：码校验先行且与「标识不存在」对外同形。错码/缺码统一回 ErrResetCodeInvalid/ErrResetCodeRequired，
+// 不暴露标识是否存在；唯有持有「发往该标识的有效码」者（即标识所有者）越过码闸后，才可能见到
+// ErrNoLocalIdentity 友好拒绝（oauth-only / 无本地标识），这不构成对他人账号的枚举。
+// 失败按 identifier(=发码目标)+IP 计入 pwreset 作用域 RateLimiter，触顶锁定，成功清零。
+// 返回 firstSet：true 表示此前无密码（首设），false 表示替换既有密码（重置）。
+func (s *PasswordService) ForgotPassword(ctx context.Context, identifier, code, encryptedB64, ip string) (firstSet bool, err error) {
+	dest := identifier
+
+	// 先查锁定（pwreset 作用域，与登录锁独立）：触顶直接拒，省去解密/验码开销。
+	locked, err := s.limiter.IsLocked(ctx, auth.ScopePasswordReset, dest, ip)
+	if err != nil {
+		return false, fmt.Errorf("查询忘记密码锁定状态失败: %w", err)
+	}
+	if locked {
+		return false, ErrResetLocked
+	}
+
+	// 缺码不计失败（纯漏填，非爆破）：直接提示需验证码。
+	if code == "" {
+		return false, ErrResetCodeRequired
+	}
+
+	// 解密与策略校验先于验码（用户输入纠错，不应消费 OTP、也不算爆破失败）。
+	plain, err := s.rsa.Decrypt(encryptedB64)
+	if err != nil {
+		return false, ErrInvalidCiphertext
+	}
+	if err := auth.ValidatePassword(plain); err != nil {
+		return false, err // 透传 auth.ErrPassword* 哨兵
+	}
+
+	// 验证 pwreset 验证码（用途隔离：login 码命名空间不同自然不通过）；命中即消费（单码一次性）。
+	ok, err := s.otp.Verify(ctx, dest, code, auth.PurposePasswordReset)
+	if err != nil {
+		return false, fmt.Errorf("校验忘记密码验证码失败: %w", err)
+	}
+	if !ok {
+		return false, s.recordResetFailure(ctx, dest, ip)
+	}
+
+	// 码已验过（标识所有者已证明）：解析标识 → 本地身份 → User。无本地身份（不存在 / oauth-only）→ 友好拒绝。
+	id, found, err := s.identities.FindByTypeIdentifier(ctx, identityType(identifier), identifier)
+	if err != nil {
+		return false, fmt.Errorf("解析忘记密码标识失败: %w", err)
+	}
+	if !found || id.Provider != "" {
+		return false, ErrNoLocalIdentity
+	}
+
+	locals, err := s.identities.ListLocalByUserUUID(ctx, id.UserUUID)
+	if err != nil {
+		return false, fmt.Errorf("查询本地身份失败: %w", err)
+	}
+	if len(locals) == 0 {
+		return false, ErrNoLocalIdentity
+	}
+	firstSet = !hasAnySecret(locals)
+
+	hash, err := s.hasher.Hash(plain)
+	if err != nil {
+		return false, fmt.Errorf("散列密码失败: %w", err)
+	}
+	if err := s.writeAccountSecret(ctx, id.UserUUID, hash); err != nil {
+		return false, err
+	}
+
+	// 成功：清零忘记密码失败计数（best-effort，secret 已落库）。
+	_ = s.limiter.ResetFailures(ctx, auth.ScopePasswordReset, dest, ip)
+	return firstSet, nil
+}
+
 // writeAccountSecret 在事务内把新 bcrypt hash 写入该 User 名下所有本地身份（账号级密码）。
 // rows==0 视为与前置 List 之间的并发删除等异常，不静默成功。首设与改密路径共用。
 func (s *PasswordService) writeAccountSecret(ctx context.Context, userUUID, hash string) error {
@@ -203,6 +279,26 @@ func (s *PasswordService) recordResetFailure(ctx context.Context, dest, ip strin
 		return ErrResetLocked
 	}
 	return ErrResetCodeInvalid
+}
+
+// ChannelForIdentifier 由标识推断 OTP 发送渠道（email/sms），供登出态忘记密码发码端点使用。
+// 复用 identityType 的同一 `@` 判别，保持身份类型与发送渠道的推断单一真相源（不在 handler 另立判别）。
+func (s *PasswordService) ChannelForIdentifier(identifier string) string {
+	if identityType(identifier) == model.IdentityTypeEmail {
+		return model.ProviderCategoryEmail
+	}
+	return model.ProviderCategorySMS
+}
+
+// identityType 由标识形态推断身份类型：含 `@` 视为 email，否则 phone。与登录页「邮箱或手机号」
+// 单输入框约定一致——登出态忘记密码页同样让用户在一个框里填邮箱或手机号。
+// 注意：标识全程按原样使用（不 trim/小写化），与登录/注册路径（signin/*_method.go）一致——
+// 防枚举要求登出态错误反馈与现有登录策略同形，故不在此单独引入规范化，避免与既有 raw 标识解析漂移。
+func identityType(identifier string) string {
+	if strings.Contains(identifier, "@") {
+		return model.IdentityTypeEmail
+	}
+	return model.IdentityTypePhone
 }
 
 // preferredLocal 选改密/预填的目标本地身份：优先 email，否则首个本地标识。调用方须保证 locals 非空。

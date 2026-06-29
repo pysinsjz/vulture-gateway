@@ -22,6 +22,8 @@ const loginPageTmpl = `<!doctype html>
   #sendCode { margin-top: 0.4rem; }
   .error { color: #dc2626; font-size: 0.9rem; }
   .msg { color: #2563eb; font-size: 0.85rem; min-height: 1.1rem; }
+  .forgot { margin: 1rem 0 0; font-size: 0.85rem; text-align: center; }
+  .forgot a { color: #2563eb; text-decoration: none; }
 </style>
 </head>
 <body>
@@ -46,6 +48,7 @@ const loginPageTmpl = `<!doctype html>
     </label>
     <button type="submit" class="primary">登录</button>
   </form>
+  <p class="forgot"><a href="/oauth/password">忘记密码?</a></p>
   <pre id="pubkey" hidden>{{.PublicKeyB64}}</pre>
 </main>
 <script>

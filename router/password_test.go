@@ -178,9 +178,9 @@ func TestPasswordPage_BindingMode(t *testing.T) {
 	}
 	extractCSRF(t, body) // 应含 csrf 隐藏域
 
-	// 无 t → 失效页（400），非空白/500。
-	if rec := do(t, e, http.MethodGet, "/oauth/password", "", nil); rec.Code != http.StatusBadRequest {
-		t.Fatalf("无 t 期望 400, 实际 %d", rec.Code)
+	// 无 t → 登出态验证码模式页（#41），非绑定页：200 且让用户自填标识。
+	if rec := do(t, e, http.MethodGet, "/oauth/password", "", nil); rec.Code != http.StatusOK {
+		t.Fatalf("无 t 期望 200 验证码模式页, 实际 %d", rec.Code)
 	}
 	// 伪造 t → 失效页。
 	if rec := do(t, e, http.MethodGet, "/oauth/password?t=bogus", "", nil); rec.Code != http.StatusBadRequest {
