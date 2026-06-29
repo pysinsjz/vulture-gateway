@@ -38,6 +38,13 @@ func (f *fakeProxy) ImageGenerations(_ context.Context, _ string, _ []byte) (*li
 	return &litellm.ProxyResult{Status: http.StatusOK, Header: h, Body: []byte(`{"data":[]}`)}, nil
 }
 
+// QianwenMultimodalGeneration 桩：固定返回 200 JSON；千问透传端点的具体行为由 router 层用真 httptest 覆盖。
+func (f *fakeProxy) QianwenMultimodalGeneration(_ context.Context, _ string, _ []byte) (*litellm.ProxyResult, error) {
+	h := http.Header{}
+	h.Set("Content-Type", "application/json")
+	return &litellm.ProxyResult{Status: http.StatusOK, Header: h, Body: []byte(`{"output":{"choices":[]}}`)}, nil
+}
+
 func (f *fakeProxy) ChatCompletions(_ context.Context, key string, _ []byte) (*litellm.ChatResponse, error) {
 	i := int(atomic.AddInt32(&f.calls, 1)) - 1
 	f.gotKeys = append(f.gotKeys, key)

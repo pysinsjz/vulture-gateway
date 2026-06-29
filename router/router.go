@@ -106,6 +106,14 @@ func NewRouter(
 		llmGroup.POST("/images/generations", llm.ImageGenerations) // 图片生成代理（同步 JSON，门禁同 chat；图片计价 park 待接入）
 	}
 
+	// 千问 DashScope 透传族：路径与 litellm 1:1 镜像，桌面端只需把 host 换成网关。
+	// 同样挂 JWTAuthLLM，确保 401/403 沿用 OpenAI 错误体口径。门禁与计量复用 ImageGenerations 同款（park）。
+	qianwenGroup := r.Group("/qianwenai/api/v1/services/aigc/multimodal-generation")
+	qianwenGroup.Use(jwtAuthLLM)
+	{
+		qianwenGroup.POST("/generation", llm.QianwenMultimodalGeneration)
+	}
+
 	if cfg.Scaffold.Enabled {
 		dev := r.Group("/__dev")
 		{

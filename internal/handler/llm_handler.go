@@ -219,6 +219,75 @@ func (h *LLMHandler) forwardImages(ctx context.Context, userUUID string, body []
 	return retry, nil
 }
 
+// QianwenMultimodalGeneration 代理 litellm DashScope 透传端点（千问图片/多模态生成）：
+//
+//	POST /qianwenai/api/v1/services/aigc/multimodal-generation/generation  (Bearer)
+//
+// 门禁顺序与 /v1/images/generations 完全一致：鉴权(中间件) → 订阅 402 → 请求体 413 → 窗口预检 429 → 转发，
+// 并保留 401/403 一次性自愈轮换。响应为同步 JSON（image 在 output.choices[0].message.content[0].image），
+// 不写入计量（与现有图片端点 park 状态一致，待图片定价接入后统一补 per-image 折算）。
+func (h *LLMHandler) QianwenMultimodalGeneration(c *gin.Context) {
+	userUUID := c.GetString(middleware.CtxKeySub)
+	active, err := h.sub.HasActiveSubscription(c.Request.Context(), userUUID)
+	if err != nil {
+		apierror.AbortOpenAI(c, http.StatusBadGateway, apierror.OpenAITypeInvalidRequest, "subscription_check_failed", "订阅状态暂不可用")
+		return
+	}
+	if !active {
+		apierror.AbortOpenAI(c, http.StatusPaymentRequired, apierror.OpenAITypeSubscriptionError, "no_active_subscription", "No active subscription. Subscribe to a plan to use the model.")
+		return
+	}
+
+	if c.Request.ContentLength > h.maxRequestBytes {
+		h.abortRequestTooLarge(c)
+		return
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, h.maxRequestBytes))
+	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			h.abortRequestTooLarge(c)
+			return
+		}
+		apierror.AbortOpenAI(c, http.StatusBadRequest, apierror.OpenAITypeInvalidRequest, "invalid_request_error", "无法读取请求体")
+		return
+	}
+
+	if pre, perr := h.meter.Precheck(c.Request.Context(), userUUID, time.Now()); perr == nil && pre.Exceeded {
+		writeWindowExceeded(c, pre)
+		return
+	}
+
+	res, err := h.forwardQianwen(c.Request.Context(), userUUID, body)
+	if err != nil {
+		apierror.AbortOpenAI(c, http.StatusBadGateway, apierror.OpenAITypeInvalidRequest, "upstream_unavailable", "图片服务暂时不可用")
+		return
+	}
+
+	litellm.CopySafeHeaders(c.Writer.Header(), res.Header)
+	c.Status(res.Status)
+	_, _ = c.Writer.Write(res.Body)
+}
+
+// forwardQianwen 转发千问多模态生成请求并复用 401/403 一次性自愈轮换（同步 JSON，无部分写入风险）。
+func (h *LLMHandler) forwardQianwen(ctx context.Context, userUUID string, body []byte) (*litellm.ProxyResult, error) {
+	res, err := h.svc.QianwenMultimodalGeneration(ctx, userUUID, body)
+	if err != nil {
+		return nil, err
+	}
+	if res.Status != http.StatusUnauthorized && res.Status != http.StatusForbidden {
+		return res, nil
+	}
+	if healErr := h.svc.RegenerateVirtualKey(ctx, userUUID); healErr != nil {
+		return res, nil
+	}
+	retry, err := h.svc.QianwenMultimodalGeneration(ctx, userUUID, body)
+	if err != nil {
+		return nil, err
+	}
+	return retry, nil
+}
+
 // forwardChat 转发 chat 请求并做一次性自愈轮换（ADR-0014 失败处理 ②）：
 // 上游返 401/403（库里 key 被 litellm 拒，如手工删 key）→ 轮换重签 + 用新 key 重试一次（仅一次防死循环）。
 // 此时流式响应体尚未开写（handler 后续才泵流），无部分写入风险。轮换失败则原样返回 401/403 让上层透传。

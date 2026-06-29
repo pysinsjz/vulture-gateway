@@ -63,3 +63,14 @@ func (s *LLMService) ImageGenerations(ctx context.Context, userUUID string, body
 	}
 	return s.llm.ImageGenerations(ctx, key, body)
 }
+
+// QianwenMultimodalGeneration 代理 litellm DashScope 透传端点（qwen-image-2.0 等）：
+// 解析用户 virtual key 后透传请求体，body 为千问原生形态（input.messages + parameters）。
+// 非法 JSON 同样直接转发，由 litellm 返标准 400。
+func (s *LLMService) QianwenMultimodalGeneration(ctx context.Context, userUUID string, body []byte) (*litellm.ProxyResult, error) {
+	key, err := s.vkeys.GetOrCreateVirtualKey(ctx, userUUID)
+	if err != nil {
+		return nil, err
+	}
+	return s.llm.QianwenMultimodalGeneration(ctx, key, body)
+}

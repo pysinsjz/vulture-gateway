@@ -30,7 +30,14 @@ type Client interface {
 	// ImageGenerations 代理 litellm POST /v1/images/generations，注入用户 virtualKey。
 	// OpenAI 图片接口始终为同步 JSON 响应（无 SSE），故复用 ProxyResult 缓冲返回，由 handler 透传。
 	ImageGenerations(ctx context.Context, virtualKey string, body []byte) (*ProxyResult, error)
+	// QianwenMultimodalGeneration 代理 litellm DashScope 透传端点
+	// POST /qianwenai/api/v1/services/aigc/multimodal-generation/generation（如 qwen-image-2.0）。
+	// 上游同步返回 JSON（image 在 output.choices[0].message.content[0].image），故同样缓冲返回。
+	QianwenMultimodalGeneration(ctx context.Context, virtualKey string, body []byte) (*ProxyResult, error)
 }
+
+// qianwenMultimodalGenerationPath 是 litellm DashScope 透传端点的路径常量，与上游 1:1 对齐。
+const qianwenMultimodalGenerationPath = "/qianwenai/api/v1/services/aigc/multimodal-generation/generation"
 
 // ProxyResult 是 litellm 上游响应的原样载体（含非 2xx；OpenAI 错误体由上游/网关透传）。
 type ProxyResult struct {
@@ -107,6 +114,31 @@ func (c *httpClient) ImageGenerations(ctx context.Context, virtualKey string, bo
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("读取 litellm images 响应失败: %w", err)
+	}
+	return &ProxyResult{Status: resp.StatusCode, Header: resp.Header, Body: respBody}, nil
+}
+
+// QianwenMultimodalGeneration 转发千问 DashScope 多模态生成请求并缓冲读完响应体。
+// 与 ImageGenerations 同款语义——同步 JSON 返回（含 output.choices[0].message.content[0].image），无 SSE 大窗。
+func (c *httpClient) QianwenMultimodalGeneration(ctx context.Context, virtualKey string, body []byte) (*ProxyResult, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+qianwenMultimodalGenerationPath, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("构造 litellm qianwen 请求失败: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if virtualKey != "" {
+		req.Header.Set("Authorization", "Bearer "+virtualKey)
+	}
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("调用 litellm %s 失败: %w", qianwenMultimodalGenerationPath, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("读取 litellm qianwen 响应失败: %w", err)
 	}
 	return &ProxyResult{Status: resp.StatusCode, Header: resp.Header, Body: respBody}, nil
 }
