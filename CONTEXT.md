@@ -28,6 +28,18 @@ _Avoid_: auth server, SSO, IAM, Casdoor
 One login channel a User authenticates through, persisted as a row in the `Identity` table (`type`=email/phone/oauth, `identifier`, `secret`=password hash or empty, `provider`). A User may have many Identities, all resolving to the same User; authentication resolves Identity → User and returns the stable `User` subject downstream.
 _Avoid_: login, credential, provider account
 
+**Password Credential**:
+The `secret` (bcrypt hash) a User authenticates with on the password channel. It is **account-level**, not per-channel: setting it writes the same hash to every local Identity of the User (`provider` empty; oauth Identities excluded), so email and phone log in with one password. An empty `secret` means the User has no Password Credential and can only sign in by code.
+_Avoid_: password (the raw input), per-identity password
+
+**Set vs Reset**:
+The two operations over a Password Credential. **Set** is first creation, when no Password Credential exists yet. **Reset** replaces an existing one. The distinction is derived server-side from whether `secret` is empty — not asserted by the client.
+_Avoid_: change password, update password, forgot password
+
+**Password Link**:
+A one-time, short-lived token that binds a signed-in Desktop Agent to the Gateway-hosted password page, proving which User without the user re-entering an identifier. Minted by an authenticated Gateway call and consumed once when the page opens. Distinct from the code-proven path a signed-out user takes from the login page's "forgot password" link.
+_Avoid_: reset token, magic link, deep link
+
 **Device**:
 An authorized Desktop Agent installation bound to a User. Each authorization creates one Device, which holds the long-lived credential and can be viewed and revoked individually.
 _Avoid_: session, client, installation

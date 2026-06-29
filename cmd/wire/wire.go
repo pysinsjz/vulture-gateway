@@ -37,8 +37,39 @@ type App struct {
 	DB     *gorm.DB
 }
 
+// wireOptions 承接装配期可覆盖项。生产路径不传任何 Option（全走真实 GORM DAO）；
+// 测试在 router 级 HTTP 缝注入内存身份/用户仓，使「设密码→密码登录」端到端回路无需真实 PostgreSQL。
+type wireOptions struct {
+	identities dao.IdentityRepository
+	users      dao.UserRepository
+	transactor dao.Transactor
+}
+
+// Option 微调 WireApp 装配（仅测试用）。
+type Option func(*wireOptions)
+
+// WithIdentityRepository 覆盖 IdentityRepository（测试注入内存实现）。
+func WithIdentityRepository(r dao.IdentityRepository) Option {
+	return func(o *wireOptions) { o.identities = r }
+}
+
+// WithUserRepository 覆盖 UserRepository（测试注入内存实现）。
+func WithUserRepository(r dao.UserRepository) Option {
+	return func(o *wireOptions) { o.users = r }
+}
+
+// WithTransactor 覆盖事务器（测试注入透传实现，使账号级写入无需真实 PostgreSQL 事务）。
+func WithTransactor(tx dao.Transactor) Option {
+	return func(o *wireOptions) { o.transactor = tx }
+}
+
 // WireApp 按层级顺序手工装配：DB/Redis → 签发器/吊销存储/授权暂存 → DAO → handler → router。
-func WireApp(cfg *config.Configuration) (*App, error) {
+func WireApp(cfg *config.Configuration, opts ...Option) (*App, error) {
+	var wo wireOptions
+	for _, o := range opts {
+		o(&wo)
+	}
+
 	rdb := redisx.NewClient(cfg.Redis)
 
 	gdb, err := db.NewPostgres(cfg.Postgres)
@@ -51,14 +82,25 @@ func WireApp(cfg *config.Configuration) (*App, error) {
 
 	authzStore := auth.NewAuthzStore(rdb, cfg.OAuth.AuthzTTL)
 	gwCodeStore := auth.NewGWCodeStore(rdb, cfg.OAuth.GWCodeTTL)
+	passwordLinkStore := auth.NewPasswordLinkStore(rdb, cfg.OAuth.PasswordLinkTTL)
 	replayStore := auth.NewRefreshReplayStore(rdb, cfg.OAuth.RefreshGraceWindow)
 	locker := auth.NewLocker(rdb)
 
 	transactor := dao.NewTransactor(gdb)
+	if wo.transactor != nil {
+		transactor = wo.transactor
+	}
 	userDAO := dao.NewUserDAO(gdb)
 	deviceDAO := dao.NewDeviceDAO(gdb)
 	refreshDAO := dao.NewRefreshTokenDAO(gdb)
 	identityDAO := dao.NewIdentityDAO(gdb)
+	// 测试注入点：用内存身份/用户仓替换真实 GORM DAO，让 router 级 HTTP 缝可跑端到端回路（无需 PostgreSQL）。
+	if wo.identities != nil {
+		identityDAO = wo.identities
+	}
+	if wo.users != nil {
+		userDAO = wo.users
+	}
 
 	// 自建身份认证（ADR-0013）：RSA 解密（dev 缺省自生成临时密钥）+ 验证码/限流/CSRF 存储。
 	rsaDecryptor, err := buildRSADecryptor(cfg.Auth.RSAPrivateKeyPEM)
@@ -128,6 +170,9 @@ func WireApp(cfg *config.Configuration) (*App, error) {
 	scaffoldHandler := handler.NewScaffoldHandler(signer, tvs)
 	oauthHandler := handler.NewOAuthHandler(authzStore, gwCodeStore, userDAO, oauthService, cfg.OAuth.ClientID)
 	loginHandler := handler.NewLoginHandler(signinRegistry, otpService, authzStore, gwCodeStore, userDAO, virtualKeyService, rsaDecryptor, csrfStore)
+	// 设密码（ADR-0015 / #39）：service 编排解密+策略+账号级写入；handler 承接 Bearer 铸链与托管页。
+	passwordService := service.NewPasswordService(identityDAO, hasher, rsaDecryptor, transactor)
+	passwordHandler := handler.NewPasswordHandler(passwordService, passwordLinkStore, csrfStore, rsaDecryptor, cfg.OAuth.GatewayBaseURL)
 	deviceHandler := handler.NewDeviceHandler(signer, deviceService)
 	// 下载代理（interim）：把内网 ClawHub 制品字节经网关回传桌面端（路线 A 伪预签名）。客户端无超时，
 	// 由请求 ctx 约束生命周期；待 ClawHub 路线 B（MinIO 真预签名、公网可达）落地后改回直接 302。
@@ -149,7 +194,7 @@ func WireApp(cfg *config.Configuration) (*App, error) {
 	bootstrapService := service.NewBootstrapService(cfg.Bootstrap.GatewayVersion, cfg.Bootstrap.MinAppVersion, cfg.Bootstrap.McpEnabled, maxUploadMB, toNotices(cfg.Bootstrap.Notices), distributionService)
 	bootstrapHandler := handler.NewBootstrapHandler(bootstrapService)
 
-	engine := router.NewRouter(cfg, probeHandler, scaffoldHandler, oauthHandler, loginHandler, deviceHandler, pluginHandler, skillHandler, telemetryHandler, llmHandler, distributionHandler, bootstrapHandler, jwtAuth, jwtAuthLLM)
+	engine := router.NewRouter(cfg, probeHandler, scaffoldHandler, oauthHandler, loginHandler, passwordHandler, deviceHandler, pluginHandler, skillHandler, telemetryHandler, llmHandler, distributionHandler, bootstrapHandler, jwtAuth, jwtAuthLLM)
 
 	return &App{Engine: engine, Redis: rdb, DB: gdb}, nil
 }

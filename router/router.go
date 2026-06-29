@@ -21,6 +21,7 @@ func NewRouter(
 	scaffold *handler.ScaffoldHandler,
 	oauth *handler.OAuthHandler,
 	login *handler.LoginHandler,
+	password *handler.PasswordHandler,
 	device *handler.DeviceHandler,
 	plugin *handler.PluginHandler,
 	skill *handler.SkillHandler,
@@ -55,6 +56,9 @@ func NewRouter(
 		oauthGroup.GET("/login", login.LoginPage)
 		oauthGroup.POST("/login", login.Login)
 		oauthGroup.POST("/send-code", login.SendCode)
+		// 网关托管设密码页（ADR-0015 / #39，绑定路径）：渲染 + 提交（页面作用域，靠 t + CSRF，不走 JWTAuth）。
+		oauthGroup.GET("/password", password.PasswordPage)
+		oauthGroup.POST("/password", password.SubmitPassword)
 	}
 
 	v1 := r.Group("/api/v1")
@@ -66,6 +70,8 @@ func NewRouter(
 		v1.GET("/app/latest", distribution.AppLatest) // 宿主 App 自更新（公开例外，#27）
 		// logout 自带鉴权（公开例外）；devices 需 Bearer。
 		v1.POST("/auth/logout", device.Logout)
+		// 设密码链接（ADR-0015 / #39）：唯一 Bearer 端点，桌面端铸取托管页一次性 Password Link。
+		v1.POST("/auth/password-link", password.PasswordLink)
 		v1.GET("/devices", device.ListDevices)
 		v1.DELETE("/devices/:device_id", device.DeleteDevice)
 		// skill 族：鉴权后转发内网 ClawHub skills/skillVersions（#20）。
@@ -95,7 +101,7 @@ func NewRouter(
 	llmGroup.Use(jwtAuthLLM)
 	{
 		llmGroup.GET("/models", llm.ListModels)
-		llmGroup.POST("/chat/completions", llm.ChatCompletions)   // 流式推理 SSE + include_usage 注入 + 双超时（#24）
+		llmGroup.POST("/chat/completions", llm.ChatCompletions)    // 流式推理 SSE + include_usage 注入 + 双超时（#24）
 		llmGroup.POST("/images/generations", llm.ImageGenerations) // 图片生成代理（同步 JSON，门禁同 chat；图片计价 park 待接入）
 	}
 

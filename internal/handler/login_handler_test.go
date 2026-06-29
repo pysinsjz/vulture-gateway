@@ -61,6 +61,27 @@ func (r *fakeIdentityRepo) FindByUserUUIDAndType(_ context.Context, userUUID, ty
 	return nil, false, nil
 }
 
+func (r *fakeIdentityRepo) ListLocalByUserUUID(_ context.Context, userUUID string) ([]model.Identity, error) {
+	var out []model.Identity
+	for _, id := range r.byKey {
+		if id.UserUUID == userUUID && id.Provider == "" {
+			out = append(out, *id)
+		}
+	}
+	return out, nil
+}
+
+func (r *fakeIdentityRepo) UpdateSecretByUserUUID(_ context.Context, userUUID, secretHash string) (int64, error) {
+	var rows int64
+	for _, id := range r.byKey {
+		if id.UserUUID == userUUID && id.Provider == "" {
+			id.Secret = secretHash
+			rows++
+		}
+	}
+	return rows, nil
+}
+
 func (r *fakeIdentityRepo) Create(_ context.Context, id *model.Identity) error {
 	r.byKey[id.Type+"|"+id.Identifier] = id
 	return nil

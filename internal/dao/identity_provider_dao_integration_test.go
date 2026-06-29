@@ -61,6 +61,59 @@ func TestIdentityDAO_CreateAndFind_Integration(t *testing.T) {
 	}
 }
 
+// 账号级写密码（ADR-0015）：UpdateSecretByUserUUID 写到该 User 所有本地身份（provider 空），
+// oauth 身份不写；ListLocalByUserUUID 只列本地身份。
+func TestIdentityDAO_ListAndUpdateSecretByUserUUID_Integration(t *testing.T) {
+	gdb, ctx := setupAuthDB(t)
+	repo := NewIdentityDAO(gdb)
+
+	const uid = "usr_itest_pw"
+	seeds := []*model.Identity{
+		{UUID: "idn_itest_pe", UserUUID: uid, Type: model.IdentityTypeEmail, Identifier: "itest-pw@x.com"},
+		{UUID: "idn_itest_pp", UserUUID: uid, Type: model.IdentityTypePhone, Identifier: "itest-13900000000"},
+		{UUID: "idn_itest_po", UserUUID: uid, Type: model.IdentityTypeOAuth, Identifier: "itest-gh|9", Provider: "github"},
+	}
+	for _, s := range seeds {
+		if err := repo.Create(ctx, s); err != nil {
+			t.Fatalf("创建 Identity 失败: %v", err)
+		}
+	}
+
+	// ListLocal 只含 email/phone（provider 空），不含 oauth。
+	locals, err := repo.ListLocalByUserUUID(ctx, uid)
+	if err != nil {
+		t.Fatalf("ListLocalByUserUUID 失败: %v", err)
+	}
+	if len(locals) != 2 {
+		t.Fatalf("应列出 2 条本地身份, 实际 %d: %+v", len(locals), locals)
+	}
+
+	// 账号级写入：受影响 2 行（本地），oauth 不动。
+	rows, err := repo.UpdateSecretByUserUUID(ctx, uid, "new-hash")
+	if err != nil {
+		t.Fatalf("UpdateSecretByUserUUID 失败: %v", err)
+	}
+	if rows != 2 {
+		t.Errorf("应更新 2 行, 实际 %d", rows)
+	}
+
+	for _, tc := range []struct {
+		typ, identifier, want string
+	}{
+		{model.IdentityTypeEmail, "itest-pw@x.com", "new-hash"},
+		{model.IdentityTypePhone, "itest-13900000000", "new-hash"},
+		{model.IdentityTypeOAuth, "itest-gh|9", ""},
+	} {
+		got, found, err := repo.FindByTypeIdentifier(ctx, tc.typ, tc.identifier)
+		if err != nil || !found {
+			t.Fatalf("查询 %s 失败 found=%v err=%v", tc.identifier, found, err)
+		}
+		if got.Secret != tc.want {
+			t.Errorf("%s secret = %q, 期望 %q", tc.identifier, got.Secret, tc.want)
+		}
+	}
+}
+
 func TestIdentityDAO_UniqueTypeIdentifier_Integration(t *testing.T) {
 	gdb, ctx := setupAuthDB(t)
 	repo := NewIdentityDAO(gdb)
