@@ -95,7 +95,8 @@ func NewRouter(
 	llmGroup.Use(jwtAuthLLM)
 	{
 		llmGroup.GET("/models", llm.ListModels)
-		llmGroup.POST("/chat/completions", llm.ChatCompletions) // 流式推理 SSE + include_usage 注入 + 双超时（#24）
+		llmGroup.POST("/chat/completions", llm.ChatCompletions)   // 流式推理 SSE + include_usage 注入 + 双超时（#24）
+		llmGroup.POST("/images/generations", llm.ImageGenerations) // 图片生成代理（同步 JSON，门禁同 chat；图片计价 park 待接入）
 	}
 
 	if cfg.Scaffold.Enabled {

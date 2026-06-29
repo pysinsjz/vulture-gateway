@@ -18,7 +18,7 @@ litellm proxy ──→ 各模型供应商
 
 ## 1. 对接约定
 
-- **端点**：`POST /v1/chat/completions`（推理）、`GET /v1/models`（模型列表）。后续可按需开 `/v1/embeddings` 等，同样代理形态。全局约定见 [api-conventions.md](./api-conventions.md)。
+- **端点**：`POST /v1/chat/completions`（推理）、`GET /v1/models`（模型列表）、`POST /v1/images/generations`（图片生成）。后续可按需开 `/v1/embeddings` 等，同样代理形态。全局约定见 [api-conventions.md](./api-conventions.md)。
 - **鉴权**：`Authorization: Bearer <网关 access JWT>`（同其他 API，见 auth.md）。网关换成**该用户专属的** litellm virtual key 转发（按用户 1:1 签发，归因 + 纵深防御保险丝，限额权威仍在网关窗口；ADR-0014）——**桌面端永远拿不到 litellm key**。库里 key 被 litellm 拒（401/403）时网关一次性自愈轮换并重试。
 - **协议**：请求/响应体为 OpenAI 格式；流式为 SSE（`data: {...}\n\n`，终止 `data: [DONE]`）；多模态走标准 message content（image_url/base64）。
 - **请求体上限**：整体请求体（含多模态 base64）≤ **25MB**；超限 ⇒ `413` + OpenAI 错误体 `code:"request_too_large"`。当前上限经 bootstrap 的 `max_upload_mb` flag 广播，桌面端可预检。
@@ -106,6 +106,33 @@ interface ChatRequest {
 
 ---
 
+---
+
+## 3a · 图片生成（代理 litellm）
+
+**`POST /v1/images/generations`**（Bearer）—— 网关代理 litellm 的同名端点，OpenAI 标准形态：
+
+```ts
+interface ImageRequest {
+  model: string;           // 取自 GET /v1/models 中的图片模型 id（如 dall-e-3、gpt-image-1）
+  prompt: string;          // 必填，提示词
+  n?: number;              // 生成张数，默认 1
+  size?: string;           // 如 "1024x1024" / "1792x1024"
+  quality?: "standard" | "hd";
+  response_format?: "url" | "b64_json";
+  // 其余 OpenAI 参数原样透传
+}
+```
+
+- 响应始终为同步 JSON（无 SSE）：`{"created":..., "data":[{"url":"..."} | {"b64_json":"..."}]}`，上游什么形态网关原样回传。
+- **门禁顺序与 chat 一致**：JWTAuthLLM → 订阅检查(402) → 请求体 ≤25MB(413) → 窗口预检(429) → 转发。订阅 / 体积 / 窗口任何一道拦截**绝不**到达 litellm。
+- **virtual key 注入**：与 chat 同口径，按用户 1:1 签发；上游 401/403 触发一次性自愈轮换 + 重试一次。
+- **错误形态**：上游错误体（参数错 / 模型不存在 / 内容策略等）原样透传 OpenAI 错误体；网关侧错误同形态。
+- **窗口预检与 chat 共享**——chat 把窗口打满会同时阻断 images 请求（同账号同窗口口径一致）。
+- **计量当前未写入图片用量**：图片接口无 token usage，按图片数量折算 Credit 需待图片 Model Price 接入（见 §6 / Park）。换言之，**图片请求会受窗口阻断但不会增厚窗口**——这是有意为之的占位态，等定价落地后再补。
+
+---
+
 ## 4. 触顶阻断（429，贴 litellm/OpenAI 惯例）
 
 窗口预检失败时，网关返回 **HTTP 429 + OpenAI 兼容错误体**——与 litellm 自身的 RateLimitError 同形态，桌面端 SDK 一套逻辑处理两种来源：
@@ -181,4 +208,5 @@ litellm 错误（OpenAI 形态 `{"error":{message,type,param,code}}`）原样透
 ## Park / 待定
 
 - **窗口上限数值与 Model Price 定价**——等产品文档（已 park，见记忆）。
+- **图片生成的 Credit 计价**——`/v1/images/generations` 已开通转发，但 per-image Credit 折算尚未接入（见 §3a），等图片定价落地后在 `MeteringService` 加 image-pricing 写入。
 - `/v1/embeddings`、`/v1/audio/*` 等其他 litellm 端点是否开放——按桌面端需求逐个加。

@@ -27,6 +27,9 @@ type Client interface {
 	// 供 handler 流式逐 chunk 透传或非流式缓冲拷贝。body 为已注入 include_usage 的请求体。
 	// 调用方负责关闭返回的 ChatResponse.Body。
 	ChatCompletions(ctx context.Context, virtualKey string, body []byte) (*ChatResponse, error)
+	// ImageGenerations 代理 litellm POST /v1/images/generations，注入用户 virtualKey。
+	// OpenAI 图片接口始终为同步 JSON 响应（无 SSE），故复用 ProxyResult 缓冲返回，由 handler 透传。
+	ImageGenerations(ctx context.Context, virtualKey string, body []byte) (*ProxyResult, error)
 }
 
 // ProxyResult 是 litellm 上游响应的原样载体（含非 2xx；OpenAI 错误体由上游/网关透传）。
@@ -81,6 +84,31 @@ func (c *httpClient) ChatCompletions(ctx context.Context, virtualKey string, bod
 		return nil, fmt.Errorf("调用 litellm /v1/chat/completions 失败: %w", err)
 	}
 	return &ChatResponse{Status: resp.StatusCode, Header: resp.Header, Body: resp.Body}, nil
+}
+
+// ImageGenerations 转发图片生成请求并缓冲读完响应体。
+// 与 chat 不同——图片接口同步返回 JSON（含 url 或 b64_json），无 SSE，无需 30min 大窗，沿用客户端默认 Timeout。
+func (c *httpClient) ImageGenerations(ctx context.Context, virtualKey string, body []byte) (*ProxyResult, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/images/generations", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("构造 litellm images 请求失败: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if virtualKey != "" {
+		req.Header.Set("Authorization", "Bearer "+virtualKey)
+	}
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("调用 litellm /v1/images/generations 失败: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("读取 litellm images 响应失败: %w", err)
+	}
+	return &ProxyResult{Status: resp.StatusCode, Header: resp.Header, Body: respBody}, nil
 }
 
 // proxyGet 执行一次 GET 转发，注入用户 virtual key，返回上游状态/头/体（非 2xx 也原样返回）。

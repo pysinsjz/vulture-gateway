@@ -53,3 +53,13 @@ func (s *LLMService) RegenerateVirtualKey(ctx context.Context, userUUID string) 
 	_, err := s.vkeys.RevokeAndRegenerate(ctx, userUUID)
 	return err
 }
+
+// ImageGenerations 代理 litellm 图片生成：解析用户 virtual key 后透传请求体。
+// 图片接口不存在 stream_options 概念，body 直接转发——非法 JSON 也照转，由 litellm 返标准 400。
+func (s *LLMService) ImageGenerations(ctx context.Context, userUUID string, body []byte) (*litellm.ProxyResult, error) {
+	key, err := s.vkeys.GetOrCreateVirtualKey(ctx, userUUID)
+	if err != nil {
+		return nil, err
+	}
+	return s.llm.ImageGenerations(ctx, key, body)
+}

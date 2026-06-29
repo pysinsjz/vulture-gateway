@@ -618,3 +618,149 @@ func TestChatCompletions_ConcurrentDebitsAtomic(t *testing.T) {
 		t.Fatalf("%d 笔并发扣减后应触顶 429, 实际 %d（疑似丢失扣减）", n, rec.Code)
 	}
 }
+
+// ===== 图片生成（/v1/images/generations）=====
+
+// stubImages 返回 200 + 标准 OpenAI 图片响应的桩 litellm，并记录命中次数与 Authorization（验证 virtual key 注入）。
+func stubImages(t *testing.T) (*httptest.Server, *string, *int32) {
+	t.Helper()
+	var gotAuth string
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Litellm-Call-Id", "img-call-1")
+		w.Header().Set("X-Litellm-Response-Cost", "0.040")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"created":1700000000,"data":[{"url":"https://example.com/a.png"}]}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &gotAuth, &hits
+}
+
+func imageReq() map[string]any {
+	return map[string]any{"model": "dall-e-3", "prompt": "a cat on a roof", "n": 1, "size": "1024x1024"}
+}
+
+// 正路：200 JSON 透传 + 注入 virtual key + 剥成本头 + 保留 call-id。
+func TestImageGenerations_HappyPath(t *testing.T) {
+	srv, gotAuth, hits := stubImages(t)
+	e := newLLMEngine(t, withLLM(srv.URL))
+	token := issueViaScaffold(t, e, "user-llm", "dev-llm")
+
+	rec := do(t, e, http.MethodPost, "/v1/images/generations", token, imageReq())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("期望 200, 实际 %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"url":"https://example.com/a.png"`) {
+		t.Errorf("响应体应原样透传, 实际 %s", rec.Body.String())
+	}
+	if atomic.LoadInt32(hits) != 1 {
+		t.Errorf("litellm 应命中 1 次, 实际 %d", atomic.LoadInt32(hits))
+	}
+	if *gotAuth != "Bearer test-vkey" {
+		t.Errorf("应注入 virtual key, 桩收到 Authorization=%q", *gotAuth)
+	}
+	if rec.Header().Get("X-Litellm-Call-Id") != "img-call-1" {
+		t.Error("x-litellm-call-id 应保留透传")
+	}
+	if rec.Header().Get("X-Litellm-Response-Cost") != "" {
+		t.Error("成本头应被剥除")
+	}
+}
+
+// 无 Bearer → 401（JWTAuthLLM 同时覆盖 chat 与 images）。
+func TestImageGenerations_NoTokenUnauthorized(t *testing.T) {
+	e := newTestEngine(t)
+	rec := do(t, e, http.MethodPost, "/v1/images/generations", "", imageReq())
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("无 token 期望 401, 实际 %d", rec.Code)
+	}
+	assertOpenAIError(t, rec, "unauthorized")
+}
+
+// 无活跃订阅 → 402 no_active_subscription，且不转发到 litellm。
+func TestImageGenerations_NoSubscription402NotForwarded(t *testing.T) {
+	srv, _, hits := stubImages(t)
+	e := newLLMEngine(t, withLLMNoSub(srv.URL))
+	token := issueViaScaffold(t, e, "user-llm", "dev-llm")
+
+	rec := do(t, e, http.MethodPost, "/v1/images/generations", token, imageReq())
+	if rec.Code != http.StatusPaymentRequired {
+		t.Fatalf("无订阅期望 402, 实际 %d: %s", rec.Code, rec.Body.String())
+	}
+	assertOpenAIError(t, rec, "no_active_subscription")
+	if n := atomic.LoadInt32(hits); n != 0 {
+		t.Errorf("无订阅不应转发, 实际命中 %d", n)
+	}
+}
+
+// 请求体 >上限 → 413 request_too_large，且不转发。
+func TestImageGenerations_RequestTooLarge413(t *testing.T) {
+	srv, _, hits := stubImages(t)
+	bodyMap := imageReq()
+	raw, _ := json.Marshal(bodyMap)
+	e := newLLMEngine(t, withLLMMaxBytes(srv.URL, int64(len(raw))-1))
+	token := issueViaScaffold(t, e, "user-llm", "dev-llm")
+
+	rec := do(t, e, http.MethodPost, "/v1/images/generations", token, bodyMap)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("超限期望 413, 实际 %d: %s", rec.Code, rec.Body.String())
+	}
+	assertOpenAIError(t, rec, "request_too_large")
+	if n := atomic.LoadInt32(hits); n != 0 {
+		t.Errorf("超限不应转发, 实际命中 %d", n)
+	}
+}
+
+// litellm 不可达 → OpenAI 形态 502 upstream_unavailable。
+func TestImageGenerations_UpstreamUnreachable(t *testing.T) {
+	e := newLLMEngine(t, withLLM("http://127.0.0.1:1"))
+	token := issueViaScaffold(t, e, "u", "d")
+
+	rec := do(t, e, http.MethodPost, "/v1/images/generations", token, imageReq())
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("期望 502, 实际 %d: %s", rec.Code, rec.Body.String())
+	}
+	assertOpenAIError(t, rec, "")
+}
+
+// 上游错误：litellm 返 400 → 网关原样透传状态码与体。
+func TestImageGenerations_UpstreamErrorPassthrough(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"bad size","type":"invalid_request_error","code":"size_not_supported"}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	e := newLLMEngine(t, withLLM(srv.URL))
+	token := issueViaScaffold(t, e, "user-llm", "dev-llm")
+
+	rec := do(t, e, http.MethodPost, "/v1/images/generations", token, imageReq())
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("应透传上游 400, 实际 %d", rec.Code)
+	}
+	assertOpenAIError(t, rec, "size_not_supported")
+}
+
+// 跨端点窗口共享：chat 把 5h 窗打满 → 后续 images 也被同窗预检拦截 429。
+func TestImageGenerations_WindowExceededByChat429(t *testing.T) {
+	// chat 与 images 共用同一个 litellm 桩：chat 路径产生 usage→扣 Credit 填满窗口。
+	srv, _ := stubChatJSON(t) // 每次 usage=prompt2+completion1 → 3 Credit
+	e := newLLMEngine(t, withLLM5hCap(srv.URL, 3))
+	token := issueViaScaffold(t, e, "user-llm", "dev-llm")
+
+	// 一发 chat 把窗口填满（Cap=3，乐观放行扣满）。
+	if rec := do(t, e, http.MethodPost, "/v1/chat/completions", token, chatReq()); rec.Code != http.StatusOK {
+		t.Fatalf("首发 chat 应放行 200, 实际 %d", rec.Code)
+	}
+
+	// images 触顶 → 429 usage_window_exceeded（同窗口共享，跨端点生效）。
+	rec := do(t, e, http.MethodPost, "/v1/images/generations", token, imageReq())
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("窗口已满 images 应 429, 实际 %d: %s", rec.Code, rec.Body.String())
+	}
+	assertOpenAIError(t, rec, "usage_window_exceeded")
+}
