@@ -163,7 +163,8 @@ def login() -> str:
         die(f"/oauth/send-code 期望 200，实际 {code_}；body={body[:300]}")
 
     try:
-        otp = redis_get(f"otp:code:{SMOKE_EMAIL}")
+        # ADR-0015/#40：OTP key 在 "用途隔离" 后改为 otp:login:code:<dest>，与 smoke_login.py 对齐。
+        otp = redis_get(f"otp:login:code:{SMOKE_EMAIL}")
     except Exception as e:  # noqa: BLE001
         die(f"读取 Redis 验证码失败：{e}（检查 REDIS_HOST/PORT/DB/PASS）")
     if not otp or not re.fullmatch(r"\d{6}", otp):
@@ -295,18 +296,48 @@ if code_ != 401:
     die(f"skills(无 token) 期望 401，实际 {code_}；body={body[:200]}")
 ok("无 token 正确 401")
 
-# ── 分类端点（§3.1b，网关派生聚合）──
-step(11, "GET /api/v1/skills|plugins/categories（Bearer，网关派生）→ 200 + categories 数组（非 404）")
-scat = get_json("skill categories", "/api/v1/skills/categories", access)
-pcat = get_json("plugin categories", "/api/v1/plugins/categories", access)
-for nm, resp in (("skill", scat), ("plugin", pcat)):
+# ── 分类端点（§3.1b，issue #44 字典口径）──
+# 验证字典口径的四条新语义：order 升序、other 强制末位、0 计数 group 保留、archived 不出。
+# ClawHub#3 上线前所有制品 categorySlug 缺失 → 全落 other 桶；其他字典 group 全 count=0
+# （正好是"招商中"信号的极端情形）。ClawHub#3 + backfill 完成后部分 group 会有 count>0，
+# "至少一个 count=0" 断言仍稳定（22 个字典里很少会全部都有制品）。
+EXPECTED_PLUGIN_SLUGS = [
+    "ecommerce", "marketing-ads", "social-media", "comms-collab",
+    "productivity", "business-ops", "design", "logistics",
+    "devtools-data", "events-projects", "other",
+]
+EXPECTED_SKILL_SLUGS = [
+    "sourcing", "market-research", "design-visual", "content-marketing",
+    "traffic-ads", "shop-ops", "logistics-customs", "data-finance",
+    "customer-lifecycle", "docs-office", "agent-infra", "other",
+]
+
+
+def assert_categories_semantics(name, resp, expected_slugs):
     cats = resp.get("categories")
-    if not isinstance(cats, list):
-        die(f"{nm} categories 响应缺 categories 数组：{str(resp)[:200]}")
+    if not isinstance(cats, list) or not cats:
+        die(f"{name} categories 响应缺 categories 数组或为空：{str(resp)[:200]}")
     for it in cats:
         if not all(k in it for k in ("id", "label", "count")):
-            die(f"{nm} categories 项形态错误（缺 id/label/count）：{it}")
-ok(f"skill 分类 {len(scat['categories'])} 组 / plugin 分类 {len(pcat['categories'])} 组（各项含 id/label/count；曾经此处 404）")
+            die(f"{name} categories 项形态错误（缺 id/label/count）：{it}")
+    # other 强制末位（即便运营字典里 order 排到中间，gateway 也重排到末位）
+    if cats[-1]["id"] != "other":
+        die(f"{name} other 应在末位，实际末位 id={cats[-1]['id']}")
+    # archived 不出 — 通过 slug 集合校验（ClawHub deploy 字典只暴露 22 个 default seed）
+    got_slugs = [c["id"] for c in cats]
+    if got_slugs != expected_slugs:
+        die(f"{name} 字典 order 不符运营顺序\n  期望: {expected_slugs}\n  实际: {got_slugs}")
+    # 0 计数 group 保留（ClawHub#3 上线 + 大量 backfill 前，至少一个 count=0 应稳定存在）
+    if not any(c["count"] == 0 for c in cats):
+        die(f"{name} 期望至少一个 count=0 group（'招商中'信号），实际全有 count；可能 ClawHub 字典口径退化")
+
+
+step(11, "GET /api/v1/skills|plugins/categories（Bearer，issue #44 字典口径）→ 200 + 字典语义全套")
+scat = get_json("skill categories", "/api/v1/skills/categories", access)
+pcat = get_json("plugin categories", "/api/v1/plugins/categories", access)
+assert_categories_semantics("skill", scat, EXPECTED_SKILL_SLUGS)
+assert_categories_semantics("plugin", pcat, EXPECTED_PLUGIN_SLUGS)
+ok(f"skill {len(scat['categories'])} 组 / plugin {len(pcat['categories'])} 组：order 运营序、other 末位、≥1 个 0 计数保留")
 
 print("\n✅ PASS — ClawHub 全链路（网关鉴权 → 列表/详情/版本/resolve/下载反代/遥测/分类派生）端到端通过")
 sys.exit(0)

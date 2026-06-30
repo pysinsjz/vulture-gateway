@@ -19,6 +19,11 @@ type fakeSkills struct {
 	gotItems []clawhub.VerdictRequestItem
 	gotHash  string
 	err      error
+
+	// dict 字典 fake。dictErr 单独区分以便测 "字典报错 vs 列表报错" 不同分支。
+	dict      []clawhub.CategoryDict
+	dictErr   error
+	dictCalls int
 }
 
 func (f *fakeSkills) ListSkills(_ context.Context, _ clawhub.SkillListParams) (*clawhub.SkillPage, error) {
@@ -47,6 +52,10 @@ func (f *fakeSkills) SkillDownloadStreamURL(slug, version string) string {
 func (f *fakeSkills) SecurityVerdicts(_ context.Context, items []clawhub.VerdictRequestItem) (*clawhub.SecurityVerdictResult, error) {
 	f.gotItems = items
 	return f.verdicts, f.err
+}
+func (f *fakeSkills) ListSkillCategoriesDictionary(_ context.Context) ([]clawhub.CategoryDict, error) {
+	f.dictCalls++
+	return f.dict, f.dictErr
 }
 
 // 列表翻译 + X-Platform 平台过滤（metadata.systems）。
@@ -211,19 +220,35 @@ func (f *pagedSkills) ListSkills(_ context.Context, _ clawhub.SkillListParams) (
 	return p, nil
 }
 
-// SkillCategories 派生聚合：游标翻全量 + X-Platform 兼容过滤 + 首现序 + nil→「其他」末位 + 计数。
-func TestSkillCategories_DerivesGroupedCounts(t *testing.T) {
+// skillDict 是端到端 skill categories 测试共用的字典 fixture：order 打乱 + archived +
+// other 排中间，与 pluginDict 同款覆盖意图。
+func skillDict() []clawhub.CategoryDict {
+	return []clawhub.CategoryDict{
+		{Slug: "market-research", Label: "市场调研与分析", Order: 20},
+		{Slug: "other", Label: "其他", Order: 30},
+		{Slug: "sourcing", Label: "货源与选品", Order: 10},
+		{Slug: "design-visual", Label: "产品设计与视觉", Order: 40},
+		{Slug: "archived-bucket", Label: "废弃桶", Order: 25, Archived: true},
+	}
+}
+
+// 综合行为：order 升序 + archived 不出 + other 末位 + 0 计数保留 + X-Platform 过滤 +
+// 缺失/未知 slug 落 other。
+func TestSkillCategories_DictDrivenAggregation(t *testing.T) {
 	fake := &pagedSkills{
-		fakeSkills: &fakeSkills{},
+		fakeSkills: &fakeSkills{dict: skillDict()},
 		pages: []*clawhub.SkillPage{
 			{Items: []clawhub.SkillListItem{
-				{Slug: "a", Category: &clawhub.Category{ID: "research", Label: "市场调研"}, Metadata: &clawhub.SkillMetadata{Systems: []string{"darwin-arm64"}}},
-				{Slug: "b", Category: &clawhub.Category{ID: "research", Label: "市场调研"}}, // 无 metadata → 兼容
-				{Slug: "c", Category: &clawhub.Category{ID: "selection", Label: "货源与选品"}, Metadata: &clawhub.SkillMetadata{Systems: []string{"win32-x64"}}}, // 平台过滤掉
+				{Slug: "a", SkillCategorySlug: "sourcing", Metadata: &clawhub.SkillMetadata{Systems: []string{"darwin-arm64"}}},
+				{Slug: "b", SkillCategorySlug: "sourcing"}, // 无 metadata → 兼容
+				{Slug: "c", SkillCategorySlug: "market-research", Metadata: &clawhub.SkillMetadata{Systems: []string{"win32-x64"}}}, // 平台过滤掉
 			}, NextCursor: strPtr("c2")},
 			{Items: []clawhub.SkillListItem{
-				{Slug: "d", Category: &clawhub.Category{ID: "selection", Label: "货源与选品"}, Metadata: &clawhub.SkillMetadata{Systems: []string{"darwin-arm64"}}},
-				{Slug: "e"}, // category==nil → 「其他」
+				{Slug: "d", SkillCategorySlug: "market-research", Metadata: &clawhub.SkillMetadata{Systems: []string{"darwin-arm64"}}},
+				{Slug: "e"},                                                              // categorySlug 空 → other
+				{Slug: "f", SkillCategorySlug: "deleted-slug"},                           // 字典里没有 → other
+				{Slug: "g", SkillCategorySlug: "archived-bucket"},                        // archived → other
+				// design-visual 无任何制品 → count=0 保留
 			}, NextCursor: nil},
 		},
 	}
@@ -236,10 +261,12 @@ func TestSkillCategories_DerivesGroupedCounts(t *testing.T) {
 	if fake.calls != 2 {
 		t.Errorf("应翻完 2 页, 实际调用 %d 次", fake.calls)
 	}
+
 	want := []service.CategoryCount{
-		{ID: "research", Label: "市场调研", Count: 2},  // a + b
-		{ID: "selection", Label: "货源与选品", Count: 1}, // 仅 d（c 被平台过滤），首现序在 research 之后
-		{ID: "other", Label: "其他", Count: 1},       // e，末位
+		{ID: "sourcing", Label: "货源与选品", Count: 2},          // a + b
+		{ID: "market-research", Label: "市场调研与分析", Count: 1}, // 仅 d
+		{ID: "design-visual", Label: "产品设计与视觉", Count: 0},   // "招商中"
+		{ID: "other", Label: "其他", Count: 3},               // e + f + g，末位
 	}
 	if len(res.Categories) != len(want) {
 		t.Fatalf("分类数 = %d, 期望 %d: %+v", len(res.Categories), len(want), res.Categories)
@@ -251,11 +278,19 @@ func TestSkillCategories_DerivesGroupedCounts(t *testing.T) {
 	}
 }
 
-// 错误传播：上游列表报错时直接上抛，不吞。
-func TestSkillCategories_PropagatesError(t *testing.T) {
-	svc := service.NewSkillService(&fakeSkills{err: &clawhub.Error{Status: 503, Code: "unavailable"}})
+// 字典报错上抛：service 不吞错继续聚合。
+func TestSkillCategories_DictErrorPropagated(t *testing.T) {
+	svc := service.NewSkillService(&fakeSkills{dictErr: &clawhub.Error{Status: 503, Code: "unavailable"}})
 	if _, err := svc.SkillCategories(context.Background(), service.CompatContext{}); err == nil {
-		t.Fatal("期望上游错误上抛, 实际 nil")
+		t.Fatal("期望字典错误上抛, 实际 nil")
+	}
+}
+
+// 列表报错上抛（字典成功）。
+func TestSkillCategories_ListErrorPropagated(t *testing.T) {
+	svc := service.NewSkillService(&fakeSkills{dict: skillDict(), err: &clawhub.Error{Status: 503, Code: "unavailable"}})
+	if _, err := svc.SkillCategories(context.Background(), service.CompatContext{}); err == nil {
+		t.Fatal("期望列表错误上抛, 实际 nil")
 	}
 }
 

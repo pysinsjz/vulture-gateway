@@ -21,6 +21,11 @@ type fakeClawHub struct {
 	trust           *clawhub.PluginTrust
 	gotVersion      string
 	err             error
+
+	// dict 字典 fake。dictErr 单独区分以便测 "字典报错 vs 列表报错" 不同分支。
+	dict      []clawhub.CategoryDict
+	dictErr   error
+	dictCalls int
 }
 
 func (f *fakeClawHub) ListPackages(_ context.Context, params clawhub.ListParams) (*clawhub.PackagePage, error) {
@@ -58,6 +63,11 @@ func (f *fakeClawHub) PackageArtifactStreamURL(name, version string) string {
 
 func (f *fakeClawHub) PackageSecurity(_ context.Context, _, _ string) (*clawhub.PluginTrust, error) {
 	return f.trust, f.err
+}
+
+func (f *fakeClawHub) ListPluginCategoriesDictionary(_ context.Context) ([]clawhub.CategoryDict, error) {
+	f.dictCalls++
+	return f.dict, f.dictErr
 }
 
 func boolPtr(b bool) *bool { return &b }
@@ -197,19 +207,35 @@ func (f *pagedPackages) ListPackages(_ context.Context, _ clawhub.ListParams) (*
 	return p, nil
 }
 
-// PluginCategories 派生聚合：游标翻全量 + X-Platform 兼容过滤 + 首现序 + nil→「其他」末位 + 计数。
-func TestPluginCategories_DerivesGroupedCounts(t *testing.T) {
+// pluginDict 是端到端 categories 测试共用的字典 fixture：
+// order 故意打乱 + 含 archived 项 + `other` 排中间（验证强制末位）+ 真实运营 slug 子集。
+func pluginDict() []clawhub.CategoryDict {
+	return []clawhub.CategoryDict{
+		{Slug: "marketing-ads", Label: "营销与广告", Order: 20},
+		{Slug: "other", Label: "其他", Order: 30}, // 故意排中间，验证 buildCategoriesResponse 强制末位
+		{Slug: "ecommerce", Label: "电商与市场", Order: 10},
+		{Slug: "social-media", Label: "社交媒体", Order: 40},
+		{Slug: "archived-bucket", Label: "废弃桶", Order: 25, Archived: true}, // 应被过滤
+	}
+}
+
+// 综合行为：order 升序 + archived 不出 + other 末位 + 0 计数保留 + X-Platform 过滤 +
+// 缺失/未知 slug 落 other。一个用例覆盖五条 issue body 验收语义，避免 fixture 重复。
+func TestPluginCategories_DictDrivenAggregation(t *testing.T) {
 	fake := &pagedPackages{
-		fakeClawHub: &fakeClawHub{},
+		fakeClawHub: &fakeClawHub{dict: pluginDict()},
 		pages: []*clawhub.PackagePage{
 			{Items: []clawhub.PackageListItem{
-				{Name: "@v/a", PluginCategory: &clawhub.Category{ID: "ecommerce", Label: "电商与市场"}},
-				{Name: "@v/b", PluginCategory: &clawhub.Category{ID: "marketing", Label: "营销与广告"}, HostTargets: []string{"win32-x64"}}, // 平台过滤掉
-				{Name: "@v/c", PluginCategory: &clawhub.Category{ID: "ecommerce", Label: "电商与市场"}, HostTargets: []string{"darwin-arm64"}},
+				{Name: "@v/a", PluginCategorySlug: "ecommerce"},
+				{Name: "@v/b", PluginCategorySlug: "marketing-ads", HostTargets: []string{"win32-x64"}}, // 平台过滤掉
+				{Name: "@v/c", PluginCategorySlug: "ecommerce", HostTargets: []string{"darwin-arm64"}},
 			}, NextCursor: strPtr("c2")},
 			{Items: []clawhub.PackageListItem{
-				{Name: "@v/d", PluginCategory: &clawhub.Category{ID: "marketing", Label: "营销与广告"}},
-				{Name: "@v/e"}, // pluginCategory==nil → 「其他」
+				{Name: "@v/d", PluginCategorySlug: "marketing-ads"},
+				{Name: "@v/e"}, // categorySlug 空 → other
+				{Name: "@v/f", PluginCategorySlug: "deleted-slug"},                  // 字典里没有 → other
+				{Name: "@v/g", PluginCategorySlug: "archived-bucket"},               // archived 已从字典移除 → other
+				// social-media 无任何制品 → count=0 但仍出现（"招商中"）
 			}, NextCursor: nil},
 		},
 	}
@@ -222,10 +248,13 @@ func TestPluginCategories_DerivesGroupedCounts(t *testing.T) {
 	if fake.calls != 2 {
 		t.Errorf("应翻完 2 页, 实际调用 %d 次", fake.calls)
 	}
+
 	want := []service.CategoryCount{
-		{ID: "ecommerce", Label: "电商与市场", Count: 2}, // a + c
-		{ID: "marketing", Label: "营销与广告", Count: 1},  // 仅 d（b 被平台过滤），首现序在 ecommerce 之后
-		{ID: "other", Label: "其他", Count: 1},        // e，末位
+		{ID: "ecommerce", Label: "电商与市场", Count: 2},    // a + c
+		{ID: "marketing-ads", Label: "营销与广告", Count: 1}, // 仅 d（b 平台过滤）
+		{ID: "social-media", Label: "社交媒体", Count: 0},   // 0 计数保留（"招商中"）
+		// archived-bucket 不出（archived 过滤）
+		{ID: "other", Label: "其他", Count: 3}, // e + f + g，强制末位
 	}
 	if len(res.Categories) != len(want) {
 		t.Fatalf("分类数 = %d, 期望 %d: %+v", len(res.Categories), len(want), res.Categories)
@@ -237,10 +266,19 @@ func TestPluginCategories_DerivesGroupedCounts(t *testing.T) {
 	}
 }
 
-// 错误传播：上游列表报错时直接上抛。
-func TestPluginCategories_PropagatesError(t *testing.T) {
+// 字典报错：上游字典端点失败直接上抛，service 不应吞错继续聚合。
+func TestPluginCategories_DictErrorPropagated(t *testing.T) {
 	hubErr := &clawhub.Error{Status: 503, Code: "unavailable"}
-	svc := service.NewPluginService(&fakeClawHub{err: hubErr})
+	svc := service.NewPluginService(&fakeClawHub{dictErr: hubErr})
+	if _, err := svc.PluginCategories(context.Background(), service.CompatContext{}); !errors.Is(err, hubErr) {
+		t.Errorf("应原样上抛字典错误, 实际 %v", err)
+	}
+}
+
+// 列表报错：字典成功但 ListPackages 失败应上抛（之前的覆盖回归）。
+func TestPluginCategories_ListErrorPropagated(t *testing.T) {
+	hubErr := &clawhub.Error{Status: 503, Code: "unavailable"}
+	svc := service.NewPluginService(&fakeClawHub{dict: pluginDict(), err: hubErr})
 	if _, err := svc.PluginCategories(context.Background(), service.CompatContext{}); !errors.Is(err, hubErr) {
 		t.Errorf("应原样上抛 ClawHub 错误, 实际 %v", err)
 	}

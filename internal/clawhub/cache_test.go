@@ -13,14 +13,16 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// fakePackagesClient 是 PackagesClient 的最小内存假实现，按 ListPackages/GetPackage 计数。
+// fakePackagesClient 是 PackagesClient 的最小内存假实现，按 ListPackages/GetPackage/字典 计数。
 // 其他方法 panic 提示用例覆盖错位。
 type fakePackagesClient struct {
 	listCalls atomic.Int64
 	getCalls  atomic.Int64
+	dictCalls atomic.Int64
 
 	listFn func(context.Context, ListParams) (*PackagePage, error)
 	getFn  func(context.Context, string) (*PackageDetail, error)
+	dictFn func(context.Context) ([]CategoryDict, error)
 }
 
 func (f *fakePackagesClient) ListPackages(ctx context.Context, p ListParams) (*PackagePage, error) {
@@ -55,6 +57,13 @@ func (f *fakePackagesClient) PackageArtifactStreamURL(string, string) string {
 func (f *fakePackagesClient) PackageSecurity(context.Context, string, string) (*PluginTrust, error) {
 	panic("not expected")
 }
+func (f *fakePackagesClient) ListPluginCategoriesDictionary(ctx context.Context) ([]CategoryDict, error) {
+	f.dictCalls.Add(1)
+	if f.dictFn != nil {
+		return f.dictFn(ctx)
+	}
+	return []CategoryDict{{Slug: "ecommerce", Label: "电商", Order: 10}, {Slug: "other", Label: "其他", Order: 9999}}, nil
+}
 
 func newTestCacheRDB(t *testing.T) (*redis.Client, *miniredis.Miniredis) {
 	t.Helper()
@@ -85,6 +94,42 @@ func TestCachingPackages_ListHitsAfterFirstCall(t *testing.T) {
 	}
 	if got := fake.listCalls.Load(); got != 1 {
 		t.Errorf("inner ListPackages 调用次数 = %d, 期望 1（首次 miss，后续 hit）", got)
+	}
+}
+
+// 字典命中：连续三次 ListPluginCategoriesDictionary，inner 仅一次（key 固定无参）。
+func TestCachingPackages_CategoriesDictHits(t *testing.T) {
+	rdb, mr := newTestCacheRDB(t)
+	fake := &fakePackagesClient{}
+	c := NewCachingPackagesClient(fake, rdb, 5*time.Minute)
+
+	for i := 0; i < 3; i++ {
+		if _, err := c.ListPluginCategoriesDictionary(context.Background()); err != nil {
+			t.Fatalf("第%d次 ListPluginCategoriesDictionary 失败: %v", i, err)
+		}
+	}
+	if got := fake.dictCalls.Load(); got != 1 {
+		t.Errorf("inner 字典调用次数 = %d, 期望 1", got)
+	}
+	keys := mr.Keys()
+	if len(keys) != 1 || keys[0] != "gw:hub:category_dict_plugin" {
+		t.Errorf("Redis key = %v, 期望 [gw:hub:category_dict_plugin]", keys)
+	}
+}
+
+// cache_ttl=0 紧急止血：装饰器整层短路，每次都击穿 inner。
+func TestCachingPackages_CategoriesDictBypassWhenTTLZero(t *testing.T) {
+	rdb, _ := newTestCacheRDB(t)
+	fake := &fakePackagesClient{}
+	c := NewCachingPackagesClient(fake, rdb, 0) // 紧急止血开关
+
+	for i := 0; i < 3; i++ {
+		if _, err := c.ListPluginCategoriesDictionary(context.Background()); err != nil {
+			t.Fatalf("第%d次 ListPluginCategoriesDictionary 失败: %v", i, err)
+		}
+	}
+	if got := fake.dictCalls.Load(); got != 3 {
+		t.Errorf("inner 字典调用次数 = %d, 期望 3（TTL=0 整层短路）", got)
 	}
 }
 

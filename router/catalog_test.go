@@ -95,20 +95,36 @@ func TestSkills_ListAndPlatformFilter(t *testing.T) {
 	}
 }
 
-// 分类端点正路（§3.1b，网关派生）：/skills/categories、/plugins/categories 落到分类 handler，
-// 聚合上游列表端点（/skills、/packages）而非被当作 slug/name 查单个制品。
-// 这正是原 bug 的回归点：曾经 GET /api/v1/skills/categories 落到 :slug 通配 → 上游按 skill 查
-// categories → 404 "Skill not found"。
+// 分类端点正路（§3.1b，issue #44 字典口径）：/skills/categories、/plugins/categories 落到
+// 分类 handler，调上游字典端点（/skills/categories、/plugins/categories）+ 聚合列表端点
+// （/skills、/packages）按 categorySlug 计数，而非被当作 slug/name 查单个制品。
+//
+// 这正是原 bug 的回归点：曾经 GET /api/v1/skills/categories 落到 :slug 通配 → 上游按 skill
+// 查 categories → 404 "Skill not found"。
+//
+// 同时回归 issue #44 新语义：archived 不出 / order 升序 / `other` 末位 / 0 计数保留 /
+// categorySlug 缺失或不在字典里 → 落 other。语义边界详细覆盖在 service 单测，这里只验路由 +
+// 字典端点确实被调 + 输出 shape 正确。
 func TestCatalog_CategoriesEndpoints(t *testing.T) {
 	stub := newCatalogStub(t, map[string]func() (int, string){
+		"/skills/categories": ok(`{"categories":[
+			{"slug":"research","label":"市场调研","order":10},
+			{"slug":"design-visual","label":"产品设计与视觉","order":20},
+			{"slug":"other","label":"其他","order":9999}
+		]}`),
 		"/skills": ok(`{"items":[
-			{"slug":"a","category":{"id":"research","label":"市场调研"}},
-			{"slug":"b","category":{"id":"research","label":"市场调研"}},
+			{"slug":"a","skillCategorySlug":"research"},
+			{"slug":"b","skillCategorySlug":"research"},
 			{"slug":"c"}
 		],"nextCursor":null}`),
+		"/plugins/categories": ok(`{"categories":[
+			{"slug":"ecommerce","label":"电商与市场","order":10},
+			{"slug":"marketing","label":"营销与广告","order":20},
+			{"slug":"other","label":"其他","order":9999}
+		]}`),
 		"/packages": ok(`{"items":[
-			{"name":"@v/a","pluginCategory":{"id":"ecommerce","label":"电商与市场"}},
-			{"name":"@v/b","pluginCategory":{"id":"marketing","label":"营销与广告"}}
+			{"name":"@v/a","pluginCategorySlug":"ecommerce"},
+			{"name":"@v/b","pluginCategorySlug":"marketing"}
 		],"nextCursor":null}`),
 	})
 	e := newTestEngine(t, withClawHub(stub.srv.URL))
@@ -122,7 +138,7 @@ func TestCatalog_CategoriesEndpoints(t *testing.T) {
 		} `json:"categories"`
 	}
 
-	// skill 分类：research(2) + 其他(1，c 无分类)。
+	// skill 分类：字典 3 项全出（research=2, design-visual=0 招商中, other=1 c 落 other），other 末位。
 	rec := do(t, e, http.MethodGet, "/api/v1/skills/categories", token, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("skill categories 期望 200（非落到 :slug → 404），实际 %d: %s", rec.Code, rec.Body.String())
@@ -131,14 +147,17 @@ func TestCatalog_CategoriesEndpoints(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &sc); err != nil {
 		t.Fatalf("解析 skill categories 失败: %v (%s)", err, rec.Body.String())
 	}
-	if len(sc.Categories) != 2 || sc.Categories[0].ID != "research" || sc.Categories[0].Count != 2 {
+	if len(sc.Categories) != 3 || sc.Categories[0].ID != "research" || sc.Categories[0].Count != 2 {
 		t.Errorf("skill 分类聚合错误: %+v", sc.Categories)
 	}
+	if sc.Categories[1].ID != "design-visual" || sc.Categories[1].Count != 0 {
+		t.Errorf("0 计数 group 应保留（招商中信号），实际 %+v", sc.Categories[1])
+	}
 	if last := sc.Categories[len(sc.Categories)-1]; last.ID != "other" || last.Count != 1 {
-		t.Errorf("未分类应归末位『其他』(count=1), 实际 %+v", last)
+		t.Errorf("other 强制末位 (count=1), 实际 %+v", last)
 	}
 
-	// plugin 分类：ecommerce(1) + marketing(1)，无未分类桶。
+	// plugin 分类：字典 3 项全出（ecommerce=1, marketing=1, other=0），other 末位。
 	rec = do(t, e, http.MethodGet, "/api/v1/plugins/categories", token, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("plugin categories 期望 200（非落到 :name → 404），实际 %d: %s", rec.Code, rec.Body.String())
@@ -147,8 +166,11 @@ func TestCatalog_CategoriesEndpoints(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &pc); err != nil {
 		t.Fatalf("解析 plugin categories 失败: %v (%s)", err, rec.Body.String())
 	}
-	if len(pc.Categories) != 2 || pc.Categories[0].ID != "ecommerce" || pc.Categories[1].ID != "marketing" {
+	if len(pc.Categories) != 3 || pc.Categories[0].ID != "ecommerce" || pc.Categories[1].ID != "marketing" {
 		t.Errorf("plugin 分类聚合错误: %+v", pc.Categories)
+	}
+	if last := pc.Categories[len(pc.Categories)-1]; last.ID != "other" {
+		t.Errorf("other 强制末位, 实际 %+v", last)
 	}
 }
 
