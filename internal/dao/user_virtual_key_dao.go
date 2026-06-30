@@ -18,8 +18,9 @@ type UserVirtualKeyRepository interface {
 	GetByUserUUID(ctx context.Context, userUUID string) (*model.UserVirtualKey, bool, error)
 	// Create 首签插入。user_uuid 唯一冲突时 inserted=false（并发首签竞态，调用方应删孤儿 key 并回查）。
 	Create(ctx context.Context, vk *model.UserVirtualKey) (inserted bool, err error)
-	// Replace 原行覆盖为新 key（自愈轮换）：保 1:1 不破唯一约束。按 user_uuid 更新 key/token/alias/status=active。
-	Replace(ctx context.Context, userUUID, litellmKey, keyAlias, tokenID string) error
+	// Replace 原行覆盖为新 key（自愈轮换）：保 1:1 不破唯一约束。按 user_uuid 更新 key/token/alias/team_alias/status=active。
+	// teamAlias 为签发瞬间快照（ADR-0016），将来订阅升级流程用于判断 key stale。
+	Replace(ctx context.Context, userUUID, litellmKey, keyAlias, tokenID, teamAlias string) error
 	// DeleteByUserUUID 物理删除某用户的 key 行（删/封用户接缝，v1 未接线）。
 	DeleteByUserUUID(ctx context.Context, userUUID string) error
 }
@@ -56,13 +57,14 @@ func (d *userVirtualKeyDAO) Create(ctx context.Context, vk *model.UserVirtualKey
 	return res.RowsAffected > 0, nil
 }
 
-func (d *userVirtualKeyDAO) Replace(ctx context.Context, userUUID, litellmKey, keyAlias, tokenID string) error {
+func (d *userVirtualKeyDAO) Replace(ctx context.Context, userUUID, litellmKey, keyAlias, tokenID, teamAlias string) error {
 	err := dbFrom(ctx, d.db).Model(&model.UserVirtualKey{}).
 		Where("user_uuid = ?", userUUID).
 		Updates(map[string]interface{}{
 			"litellm_key": litellmKey,
 			"key_alias":   keyAlias,
 			"token_id":    tokenID,
+			"team_alias":  teamAlias,
 			"status":      model.VirtualKeyStatusActive,
 		}).Error
 	if err != nil {

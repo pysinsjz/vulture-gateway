@@ -26,24 +26,23 @@ const (
 	orphanDeleteTTL   = 5 * time.Second // 孤儿 key 回删用独立短 ctx
 )
 
-// VirtualKeyService 是 ADR-0014 的单一入口：按用户 get-or-create litellm virtual key + 自愈轮换 + 删除接缝。
+// VirtualKeyService 是 ADR-0014 / 0016 的单一入口：按用户 get-or-create litellm virtual key + 自愈轮换 + 删除接缝。
 // DB 为真相源，Redis 缓存热路径，分布式锁 + 唯一约束 + 冲突回删三重防孤儿。限额权威仍在网关侧（不改 ADR-0005/0008）。
+//
+// ADR-0016：签发归属由 defaultTeamAlias 指定（如 "team-pro"），签发前调 admin.ListTeams 解析为 team_id；
+// 不缓存解析结果（team 重建立刻恢复）；alias 不存在 / 重复 → fail-closed（lazy 重试）。
 type VirtualKeyService struct {
-	repo        dao.UserVirtualKeyRepository
-	admin       litellm.AdminClient
-	cache       VKeyCache
-	locker      VKeyLocker
-	accessGroup string // 签发时下发的 litellm model access group 名（ADR-0014 修订）
+	repo             dao.UserVirtualKeyRepository
+	admin            litellm.AdminClient
+	cache            VKeyCache
+	locker           VKeyLocker
+	defaultTeamAlias string // 签发时归属的 litellm team alias（ADR-0016，如 team-pro/team-free）
 }
 
-const defaultModelAccessGroup = "vulture" // accessGroup 为空时的兜底组名
-
-// NewVirtualKeyService 构造服务。accessGroup 为签发用户 key 时下发的 litellm model access group 名；空则回退 "vulture"。
-func NewVirtualKeyService(repo dao.UserVirtualKeyRepository, admin litellm.AdminClient, cache VKeyCache, locker VKeyLocker, accessGroup string) *VirtualKeyService {
-	if accessGroup == "" {
-		accessGroup = defaultModelAccessGroup
-	}
-	return &VirtualKeyService{repo: repo, admin: admin, cache: cache, locker: locker, accessGroup: accessGroup}
+// NewVirtualKeyService 构造服务。defaultTeamAlias 为签发用户 key 时归属的 litellm team 别名；
+// 调用方（wire/config）必须传非空值——config.validate() 已强制必填校验（ADR-0016）。
+func NewVirtualKeyService(repo dao.UserVirtualKeyRepository, admin litellm.AdminClient, cache VKeyCache, locker VKeyLocker, defaultTeamAlias string) *VirtualKeyService {
+	return &VirtualKeyService{repo: repo, admin: admin, cache: cache, locker: locker, defaultTeamAlias: defaultTeamAlias}
 }
 
 func vkeyAlias(userUUID string) string   { return "user-" + userUUID }
@@ -96,8 +95,8 @@ func (s *VirtualKeyService) RevokeAndRegenerate(ctx context.Context, userUUID st
 		return s.persistFirst(ctx, userUUID, gen)
 	}
 
-	// 原行覆盖：保 1:1 不破 user_uuid 唯一约束。
-	if err := s.repo.Replace(ctx, userUUID, gen.Key, vkeyAlias(userUUID), gen.TokenID); err != nil {
+	// 原行覆盖：保 1:1 不破 user_uuid 唯一约束。team_alias 刷新为当前配置值（ADR-0016）。
+	if err := s.repo.Replace(ctx, userUUID, gen.Key, vkeyAlias(userUUID), gen.TokenID, s.defaultTeamAlias); err != nil {
 		s.deleteOrphan(gen.Key)
 		return "", fmt.Errorf("覆盖 virtual key 失败: %w", err)
 	}
@@ -156,8 +155,8 @@ func (s *VirtualKeyService) signUnderLock(ctx context.Context, userUUID string) 
 		return "", err
 	}
 	if found {
-		// 已有行但不可用：原行覆盖（避免 Create 撞 user_uuid 唯一约束）。
-		if err := s.repo.Replace(ctx, userUUID, gen.Key, vkeyAlias(userUUID), gen.TokenID); err != nil {
+		// 已有行但不可用：原行覆盖（避免 Create 撞 user_uuid 唯一约束）。team_alias 刷新为当前配置值（ADR-0016）。
+		if err := s.repo.Replace(ctx, userUUID, gen.Key, vkeyAlias(userUUID), gen.TokenID, s.defaultTeamAlias); err != nil {
 			s.deleteOrphan(gen.Key)
 			return "", fmt.Errorf("覆盖 virtual key 失败: %w", err)
 		}
@@ -167,13 +166,14 @@ func (s *VirtualKeyService) signUnderLock(ctx context.Context, userUUID string) 
 	return s.persistFirst(ctx, userUUID, gen)
 }
 
-// persistFirst 首签落库：唯一冲突时删孤儿回查既有行（防孤儿 ②③）。
+// persistFirst 首签落库：唯一冲突时删孤儿回查既有行（防孤儿 ②③）。team_alias 写入当前配置值（ADR-0016）。
 func (s *VirtualKeyService) persistFirst(ctx context.Context, userUUID string, gen *litellm.GeneratedKey) (string, error) {
 	vk := &model.UserVirtualKey{
 		UserUUID:   userUUID,
 		LitellmKey: gen.Key,
 		KeyAlias:   vkeyAlias(userUUID),
 		TokenID:    gen.TokenID,
+		TeamAlias:  s.defaultTeamAlias,
 		Status:     model.VirtualKeyStatusActive,
 	}
 	inserted, err := s.repo.Create(ctx, vk)
@@ -199,19 +199,50 @@ func (s *VirtualKeyService) persistFirst(ctx context.Context, userUUID string, g
 }
 
 func (s *VirtualKeyService) sign(ctx context.Context, userUUID string) (*litellm.GeneratedKey, error) {
-	// 签发恒下发单一 model access group 名（ADR-0014 修订：从「枚举全量明细写死」改为「下发组名」）。
-	// 组成员维护在 litellm 侧，改组即对后续所有 key 生效，无需重签。models 非空＝结构上消除 "All Proxy Models" 全开；
-	// 组若错配为空/不存在，key 解析为零模型（fail-closed，安全方向），网关不再做枚举校验。
+	// ADR-0016：签发前调 litellm /team/list 把 defaultTeamAlias 解析为 team_id；零缓存，team 重建立刻恢复。
+	// 不下发 models 字段——team 的 models 列表是模型权限的单一真相源（workaround litellm bug #3275）。
+	// alias 不存在 / 重复 / list 失败：resolveTeamID 返错，签发本次失败，lazy 重试或返 upstream_unavailable。
+	teamID, err := s.resolveTeamID(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("签发 virtual key 失败: %w", err)
+	}
 	gen, err := s.admin.GenerateKey(ctx, litellm.GenerateKeyParams{
 		KeyAlias:  vkeyAlias(userUUID),
 		UserID:    userUUID,
-		Models:    []string{s.accessGroup},
+		TeamID:    teamID,
 		MaxBudget: vkeyMaxBudgetFuse,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("签发 virtual key 失败: %w", err)
 	}
 	return gen, nil
+}
+
+// resolveTeamID 把 defaultTeamAlias 解析为 litellm team_id（ADR-0016）。
+// 0 匹配 → fail-closed（alias 不存在）；多匹配 → fail-closed（歧义，运维需消除）。
+func (s *VirtualKeyService) resolveTeamID(ctx context.Context) (string, error) {
+	teams, err := s.admin.ListTeams(ctx)
+	if err != nil {
+		return "", fmt.Errorf("拉取 team 列表失败: %w", err)
+	}
+	var matched []litellm.Team
+	for _, t := range teams {
+		if t.Alias == s.defaultTeamAlias {
+			matched = append(matched, t)
+		}
+	}
+	switch len(matched) {
+	case 0:
+		return "", fmt.Errorf("team alias %q 在 litellm 不存在（请在 litellm 后台建好该 team）", s.defaultTeamAlias)
+	case 1:
+		return matched[0].ID, nil
+	default:
+		ids := make([]string, len(matched))
+		for i, t := range matched {
+			ids[i] = t.ID
+		}
+		return "", fmt.Errorf("team alias %q 在 litellm 匹配多个 team_id: %v（运维需消除歧义）", s.defaultTeamAlias, ids)
+	}
 }
 
 // tryLock 在 vkeyLockMaxWait 内争锁；超时返回 false 降级裸签（DB 唯一约束 + 冲突回删兜底）。

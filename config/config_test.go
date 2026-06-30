@@ -33,6 +33,8 @@ redis:
 jwt:
   secret: "loaded-secret"
   access_ttl: "15m"
+llm:
+  default_team_alias: "team-pro"
 scaffold:
   enabled: true
 `)
@@ -63,6 +65,8 @@ func TestLoad_EnvOverridesSecret(t *testing.T) {
 env: unittest
 jwt:
   secret: ""
+llm:
+  default_team_alias: "team-pro"
 `)
 	t.Setenv("VG_JWT_SECRET", "from-env")
 
@@ -91,5 +95,74 @@ func TestLoad_MissingFile(t *testing.T) {
 	t.Chdir(t.TempDir())
 	if _, err := Load("doesnotexist"); err == nil {
 		t.Fatal("缺失配置文件应返回错误")
+	}
+}
+
+// 明文密码旁路是 dev/test 后门，prod/staging 不得开启。校验由 Configuration.validate 强制顶住。
+func TestLoad_RejectsAllowPlaintextPasswordInProd(t *testing.T) {
+	writeConfig(t, "prod", `
+env: prod
+jwt:
+  secret: "prod-secret"
+auth:
+  rsa_private_key_pem: "-----BEGIN PRIVATE KEY-----\nstub\n-----END PRIVATE KEY-----"
+  allow_plaintext_password: true
+llm:
+  master_key: "ml-key"
+  default_team_alias: "team-free"
+`)
+
+	if _, err := Load("prod"); err == nil {
+		t.Fatal("prod 开启 allow_plaintext_password 应启动失败")
+	}
+}
+
+func TestLoad_RejectsAllowPlaintextPasswordInStaging(t *testing.T) {
+	writeConfig(t, "staging", `
+env: staging
+jwt:
+  secret: "staging-secret"
+auth:
+  rsa_private_key_pem: "-----BEGIN PRIVATE KEY-----\nstub\n-----END PRIVATE KEY-----"
+  allow_plaintext_password: true
+llm:
+  master_key: "ml-key"
+  default_team_alias: "team-free"
+`)
+
+	if _, err := Load("staging"); err == nil {
+		t.Fatal("staging 开启 allow_plaintext_password 应启动失败")
+	}
+}
+
+func TestLoad_AllowsPlaintextPasswordInDev(t *testing.T) {
+	writeConfig(t, "dev", `
+env: dev
+jwt:
+  secret: "dev-secret"
+auth:
+  allow_plaintext_password: true
+llm:
+  default_team_alias: "team-pro"
+`)
+
+	cfg, err := Load("dev")
+	if err != nil {
+		t.Fatalf("dev 允许 allow_plaintext_password，Load 不应失败: %v", err)
+	}
+	if !cfg.Auth.AllowPlaintextPassword {
+		t.Error("auth.allow_plaintext_password 应为 true")
+	}
+}
+
+// ADR-0016：llm.default_team_alias 所有环境必填，缺失则启动失败（fail-loud 防 prod 漏配静默回退）。
+func TestLoad_RejectsEmptyDefaultTeamAlias(t *testing.T) {
+	writeConfig(t, "unittest", `
+env: unittest
+jwt:
+  secret: "loaded-secret"
+`)
+	if _, err := Load("unittest"); err == nil {
+		t.Fatal("空 llm.default_team_alias 应返回错误")
 	}
 }

@@ -54,7 +54,7 @@ func (r *fakeVKeyRepo) Create(_ context.Context, vk *model.UserVirtualKey) (bool
 	return true, nil
 }
 
-func (r *fakeVKeyRepo) Replace(_ context.Context, userUUID, key, alias, tokenID string) error {
+func (r *fakeVKeyRepo) Replace(_ context.Context, userUUID, key, alias, tokenID, teamAlias string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	vk, ok := r.rows[userUUID]
@@ -64,6 +64,7 @@ func (r *fakeVKeyRepo) Replace(_ context.Context, userUUID, key, alias, tokenID 
 	vk.LitellmKey = key
 	vk.KeyAlias = alias
 	vk.TokenID = tokenID
+	vk.TeamAlias = teamAlias
 	vk.Status = model.VirtualKeyStatusActive
 	return nil
 }
@@ -79,20 +80,35 @@ type fakeAdmin struct {
 	mu         sync.Mutex
 	genCalls   int
 	delCalls   int
+	listCalls  int
 	deleted    []string
 	nextKey    string
 	failGen    bool
 	keyCounter int
-	lastModels []string // 记录最后一次 GenerateKey 收到的 Models
+	lastTeamID string         // 记录最后一次 GenerateKey 收到的 TeamID（ADR-0016）
+	lastBody   map[string]any // 记录最后一次 GenerateKey 收到的全部参数副本（断言 Models 字段是否消失）
+	// teams 是 ListTeams 返回的固定列表；空＝默认含 alias=test-team-alias 的单项。
+	teams []litellm.Team
+	// failList true 时 ListTeams 返错（模拟 litellm 不可达）。
+	failList bool
 }
 
-func newFakeAdmin() *fakeAdmin { return &fakeAdmin{} }
+func newFakeAdmin() *fakeAdmin {
+	return &fakeAdmin{teams: []litellm.Team{{ID: "team-uuid-default", Alias: "test-team-alias"}}}
+}
 
 func (a *fakeAdmin) GenerateKey(_ context.Context, p litellm.GenerateKeyParams) (*litellm.GeneratedKey, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.genCalls++
-	a.lastModels = p.Models
+	a.lastTeamID = p.TeamID
+	// 拷一份「业务关心的字段」做断言用。
+	a.lastBody = map[string]any{
+		"key_alias":  p.KeyAlias,
+		"user_id":    p.UserID,
+		"team_id":    p.TeamID,
+		"max_budget": p.MaxBudget,
+	}
 	if a.failGen {
 		return nil, errors.New("litellm 不可达")
 	}
@@ -110,6 +126,18 @@ func (a *fakeAdmin) DeleteKey(_ context.Context, key string) error {
 	a.delCalls++
 	a.deleted = append(a.deleted, key)
 	return nil
+}
+
+func (a *fakeAdmin) ListTeams(_ context.Context) ([]litellm.Team, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.listCalls++
+	if a.failList {
+		return nil, errors.New("litellm /team/list 不可达")
+	}
+	out := make([]litellm.Team, len(a.teams))
+	copy(out, a.teams)
+	return out, nil
 }
 
 type fakeCache struct {
@@ -146,11 +174,14 @@ func (fakeLocker) Acquire(_ context.Context, _ string, _ time.Duration) (bool, e
 }
 func (fakeLocker) Release(_ context.Context, _ string) {}
 
+// testTeamAlias 是新 svc 默认配的 team alias，匹配 fakeAdmin.teams 里预置的单项（ADR-0016）。
+const testTeamAlias = "test-team-alias"
+
 func newSvc() (*service.VirtualKeyService, *fakeVKeyRepo, *fakeAdmin, *fakeCache) {
 	repo := newFakeVKeyRepo()
 	admin := newFakeAdmin()
 	cache := newFakeCache()
-	svc := service.NewVirtualKeyService(repo, admin, cache, fakeLocker{}, "vulture")
+	svc := service.NewVirtualKeyService(repo, admin, cache, fakeLocker{}, testTeamAlias)
 	return svc, repo, admin, cache
 }
 
@@ -209,29 +240,84 @@ func TestGetOrCreate_FirstSign(t *testing.T) {
 	}
 }
 
-// 首签下发单一 model access group 名（ADR-0014 修订：从枚举全量明细改为下发组名，组成员维护在 litellm 侧）。
-func TestGetOrCreate_SignCarriesAccessGroup(t *testing.T) {
-	svc, _, admin, _ := newSvc() // newSvc 注入组名 "vulture"
+// 首签解析 alias 为 team_id 后下发；models 字段不下发（ADR-0016 workaround litellm bug #3275）。
+func TestGetOrCreate_SignCarriesResolvedTeamID(t *testing.T) {
+	svc, _, admin, _ := newSvc() // newSvc 注入 alias=testTeamAlias，fakeAdmin 预置匹配 team
 
 	if _, err := svc.GetOrCreateVirtualKey(context.Background(), "u1"); err != nil {
 		t.Fatalf("err=%v", err)
 	}
-	if len(admin.lastModels) != 1 || admin.lastModels[0] != "vulture" {
-		t.Errorf("签发应只下发 access group 名 [vulture], 实际 %+v", admin.lastModels)
+	if admin.lastTeamID != "team-uuid-default" {
+		t.Errorf("签发应下发解析后的 team_id=team-uuid-default, 实际 %q", admin.lastTeamID)
+	}
+	if admin.listCalls != 1 {
+		t.Errorf("应调一次 /team/list 解析 alias, 实际 listCalls=%d", admin.listCalls)
 	}
 }
 
-// 空组名构造时回退默认 "vulture"（零配置兜底）。
-func TestSign_EmptyGroupFallsBackToDefault(t *testing.T) {
-	repo := newFakeVKeyRepo()
-	admin := newFakeAdmin()
-	svc := service.NewVirtualKeyService(repo, admin, newFakeCache(), fakeLocker{}, "")
+// 首签把 team_alias 快照写到落库行（ADR-0016 订阅升级钩子）。
+func TestGetOrCreate_PersistsTeamAlias(t *testing.T) {
+	svc, repo, _, _ := newSvc()
 
 	if _, err := svc.GetOrCreateVirtualKey(context.Background(), "u1"); err != nil {
 		t.Fatalf("err=%v", err)
 	}
-	if len(admin.lastModels) != 1 || admin.lastModels[0] != "vulture" {
-		t.Errorf("空组名应回退默认 [vulture], 实际 %+v", admin.lastModels)
+	if repo.rows["u1"] == nil {
+		t.Fatal("应落库")
+	}
+	if repo.rows["u1"].TeamAlias != testTeamAlias {
+		t.Errorf("team_alias 应快照为配置值 %q, 实际 %q", testTeamAlias, repo.rows["u1"].TeamAlias)
+	}
+}
+
+// resolveTeamID alias 找不到 → fail-closed（签发不发起，返错）。
+func TestSign_AliasNotFound_FailClosed(t *testing.T) {
+	repo := newFakeVKeyRepo()
+	admin := newFakeAdmin()
+	admin.teams = []litellm.Team{{ID: "uuid-other", Alias: "team-other"}} // 没有 testTeamAlias
+	svc := service.NewVirtualKeyService(repo, admin, newFakeCache(), fakeLocker{}, testTeamAlias)
+
+	if _, err := svc.GetOrCreateVirtualKey(context.Background(), "u1"); err == nil {
+		t.Fatal("alias 不存在应签发失败")
+	}
+	if admin.genCalls != 0 {
+		t.Errorf("alias 解析失败不应调 GenerateKey, genCalls=%d", admin.genCalls)
+	}
+	if repo.rows["u1"] != nil {
+		t.Errorf("失败不应落库")
+	}
+}
+
+// resolveTeamID alias 匹配多个 team → fail-closed（ADR-0016：歧义不能静默选第一个）。
+func TestSign_AliasDuplicate_FailClosed(t *testing.T) {
+	repo := newFakeVKeyRepo()
+	admin := newFakeAdmin()
+	admin.teams = []litellm.Team{
+		{ID: "uuid-a", Alias: testTeamAlias},
+		{ID: "uuid-b", Alias: testTeamAlias}, // 同 alias 重复
+	}
+	svc := service.NewVirtualKeyService(repo, admin, newFakeCache(), fakeLocker{}, testTeamAlias)
+
+	if _, err := svc.GetOrCreateVirtualKey(context.Background(), "u1"); err == nil {
+		t.Fatal("alias 重复应 fail-closed 签发失败")
+	}
+	if admin.genCalls != 0 {
+		t.Errorf("alias 重复不应调 GenerateKey, genCalls=%d", admin.genCalls)
+	}
+}
+
+// resolveTeamID 列表 HTTP 失败 → 签发失败（透传）。
+func TestSign_ListTeamsFailure_PropagatesError(t *testing.T) {
+	repo := newFakeVKeyRepo()
+	admin := newFakeAdmin()
+	admin.failList = true
+	svc := service.NewVirtualKeyService(repo, admin, newFakeCache(), fakeLocker{}, testTeamAlias)
+
+	if _, err := svc.GetOrCreateVirtualKey(context.Background(), "u1"); err == nil {
+		t.Fatal("/team/list 失败应签发失败")
+	}
+	if admin.genCalls != 0 {
+		t.Errorf("ListTeams 失败不应调 GenerateKey")
 	}
 }
 
@@ -285,10 +371,10 @@ func TestGetOrCreate_ConflictDeletesOrphanAndReturnsExisting(t *testing.T) {
 	}
 }
 
-// 自愈轮换：清缓存 + 签新 + 原行覆盖 + 删旧上游 key。
+// 自愈轮换：清缓存 + 签新 + 原行覆盖（含 team_alias 快照）+ 删旧上游 key。
 func TestRevokeAndRegenerate_ReplacesAndDeletesOld(t *testing.T) {
 	svc, repo, admin, cache := newSvc()
-	repo.rows["u1"] = &model.UserVirtualKey{UserUUID: "u1", LitellmKey: "sk-old", KeyAlias: "user-u1", Status: model.VirtualKeyStatusActive}
+	repo.rows["u1"] = &model.UserVirtualKey{UserUUID: "u1", LitellmKey: "sk-old", KeyAlias: "user-u1", TeamAlias: "stale-old", Status: model.VirtualKeyStatusActive}
 	_ = cache.Set(context.Background(), "u1", "sk-old")
 	admin.nextKey = "sk-new"
 
@@ -298,6 +384,10 @@ func TestRevokeAndRegenerate_ReplacesAndDeletesOld(t *testing.T) {
 	}
 	if repo.rows["u1"].LitellmKey != "sk-new" {
 		t.Errorf("应原行覆盖为 sk-new, 实际 %q", repo.rows["u1"].LitellmKey)
+	}
+	// ADR-0016：team_alias 应被刷新到当前配置值（旧的 stale-old 被覆盖）。
+	if repo.rows["u1"].TeamAlias != testTeamAlias {
+		t.Errorf("team_alias 应覆盖为当前配置 %q, 实际 %q", testTeamAlias, repo.rows["u1"].TeamAlias)
 	}
 	// 删旧上游 key。
 	if len(admin.deleted) != 1 || admin.deleted[0] != "sk-old" {

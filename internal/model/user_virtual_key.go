@@ -19,9 +19,12 @@ type UserVirtualKey struct {
 	LitellmKey string `json:"litellm_key" gorm:"column:litellm_key;type:varchar(255);not null;comment:完整litellm key（sk-...，转发注入用，明文）"`
 	KeyAlias   string `json:"key_alias" gorm:"column:key_alias;type:varchar(100);not null;comment:litellm key 别名（user-{uuid}）"`
 	TokenID    string `json:"token_id" gorm:"column:token_id;type:varchar(255);comment:litellm 返回的 token id（改/删引用）"`
-	Status     string `json:"status" gorm:"column:status;type:varchar(20);not null;default:active;comment:状态 active/revoked"`
-	CreatedAt  int64  `json:"created_at" gorm:"column:created_at;autoCreateTime;comment:创建时间"`
-	UpdatedAt  int64  `json:"updated_at" gorm:"column:updated_at;autoUpdateTime;comment:更新时间"`
+	// TeamAlias 是签发瞬间快照的 litellm team_alias（如 team-pro），ADR-0016。
+	// 将来订阅升级流程用 team_alias != currentSubscription.TeamAlias 判断「key stale 需轮换」。
+	TeamAlias string `json:"team_alias" gorm:"column:team_alias;type:varchar(50);not null;default:'';comment:签发时的 litellm team 别名（如 team-pro，订阅升级 stale 判定依据）"`
+	Status    string `json:"status" gorm:"column:status;type:varchar(20);not null;default:active;comment:状态 active/revoked"`
+	CreatedAt int64  `json:"created_at" gorm:"column:created_at;autoCreateTime;comment:创建时间"`
+	UpdatedAt int64  `json:"updated_at" gorm:"column:updated_at;autoUpdateTime;comment:更新时间"`
 }
 
 // TableName 表名。

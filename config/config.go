@@ -72,10 +72,11 @@ type LLMConfig struct {
 	// MasterKey 是 litellm 管理员 key（ADR-0014）：仅 Admin Client 用来签发/删用户 virtual key，永不转发推理。
 	// VG_LLM_MASTER_KEY 注入；prod/staging 必填。空则不带管理鉴权头（dev 本地无鉴权 litellm）。
 	MasterKey string `mapstructure:"master_key"`
-	// ModelAccessGroup 是签发用户 virtual key 时下发的 litellm model access group 名（ADR-0014 修订）。
-	// 签发恒发 models:["<组名>"]，组成员在 litellm 侧用 model_info.access_groups 维护——改组即对后续所有 key 生效，无需重签。
-	// 默认 "vulture"；各环境 litellm 实例可用不同组名。
-	ModelAccessGroup string `mapstructure:"model_access_group"`
+	// DefaultTeamAlias 是签发用户 virtual key 时归属的 litellm team 别名（ADR-0016，如 team-pro/team-free）。
+	// 签发前调 litellm /team/list 把 alias 解析为 team_id，team 的 models 列表是模型权限的单一真相源。
+	// 所有环境必填（validate 强制非空）——无默认值，防 prod YAML 漏配静默回退到错误 team。
+	// dev/test 通常 "team-pro"，staging/prod 上线时 "team-free"。
+	DefaultTeamAlias string `mapstructure:"default_team_alias"`
 	// VKeyCacheTTL 是用户 virtual key 的 Redis 缓存寿命（热路径，DB 为真相源），默认 1h。
 	VKeyCacheTTL time.Duration `mapstructure:"vkey_cache_ttl"`
 	Timeout      time.Duration `mapstructure:"timeout"` // 非流式（如 /v1/models）转发超时，默认 30s
@@ -139,6 +140,14 @@ type AuthConfig struct {
 	// DevOTPBypassCode 是 dev/test 专用「万能验证码」：非空时提交该码即直接通过 OTP 校验，
 	// 免去查真实码（便于手动在登录页验证）。仅 dev/test 可配；prod/staging 配了将启动失败（见 validate）。
 	DevOTPBypassCode string `mapstructure:"dev_otp_bypass_code"`
+
+	// AllowPlaintextPassword 是 dev/test 专用密码托管页明文旁路：true 时，
+	// /oauth/password 提交支持 plain_password 字段（前端在非安全上下文，
+	// 即非 https://、非 localhost 时，浏览器禁用 WebCrypto 无法 RSA 加密），
+	// handler 用网关持有的 RSA 公钥就地加密一遍喂给 service，service 路径不变。
+	// 仅 dev/test 可开；prod/staging 配为 true 将启动失败（见 validate）——
+	// 与 DevOTPBypassCode 同模式：明文密码不应离开浏览器在非加密通道传输。
+	AllowPlaintextPassword bool `mapstructure:"allow_plaintext_password"`
 }
 
 // ProviderSeed 是一条验证码渠道 seed（对齐 model.Provider 核心列）。
@@ -242,7 +251,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("clawhub.base_url", "http://127.0.0.1:3211/api/v1")
 	v.SetDefault("clawhub.timeout", "10s")
 	v.SetDefault("llm.base_url", "http://127.0.0.1:4000")
-	v.SetDefault("llm.model_access_group", "vulture")
+	// llm.default_team_alias 无默认值：必须各环境 YAML 显式配置（ADR-0016 fail-loud 防漂移）。
 	v.SetDefault("llm.vkey_cache_ttl", "1h")
 	v.SetDefault("llm.timeout", "30s")
 	v.SetDefault("llm.stream_idle_timeout", "120s")
@@ -291,6 +300,10 @@ func (c *Configuration) validate() error {
 	if (c.Env == "prod" || c.Env == "staging") && c.LLM.MasterKey == "" {
 		return fmt.Errorf("llm.master_key 未配置（prod/staging 必填，由 VG_LLM_MASTER_KEY 注入）")
 	}
+	// litellm team alias（ADR-0016）：所有环境必填——fail-loud 防 prod YAML 漏配静默回退签到错 team。
+	if c.LLM.DefaultTeamAlias == "" {
+		return fmt.Errorf("llm.default_team_alias 未配置（ADR-0016 所有环境必填，dev/test 通常 team-pro，prod 上线时 team-free）")
+	}
 	// 生产/预发必须显式注入 RSA 私钥；dev/test 允许留空（启动自生成临时密钥）。
 	if (c.Env == "prod" || c.Env == "staging") && c.Auth.RSAPrivateKeyPEM == "" {
 		return fmt.Errorf("auth.rsa_private_key_pem 未配置（prod/staging 必填，由 VG_AUTH_RSA_PRIVATE_KEY_PEM 注入）")
@@ -298,6 +311,10 @@ func (c *Configuration) validate() error {
 	// 万能验证码是 dev/test 后门，prod/staging 严禁配置（否则任何人填固定码即可登录）。
 	if (c.Env == "prod" || c.Env == "staging") && c.Auth.DevOTPBypassCode != "" {
 		return fmt.Errorf("auth.dev_otp_bypass_code 不得在 %s 配置（仅限 dev/test 的万能验证码后门）", c.Env)
+	}
+	// 明文密码旁路同样是 dev/test 后门，prod/staging 严禁开启（明文密码不应在非加密通道传输）。
+	if (c.Env == "prod" || c.Env == "staging") && c.Auth.AllowPlaintextPassword {
+		return fmt.Errorf("auth.allow_plaintext_password 不得在 %s 开启（仅限 dev/test 的明文密码调试旁路）", c.Env)
 	}
 	return nil
 }

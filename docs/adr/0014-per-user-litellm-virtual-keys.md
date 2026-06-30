@@ -1,5 +1,10 @@
 # 按用户签发 litellm Virtual Key：归因 + 纵深防御，网关窗口仍权威
 
+> **【部分已废弃，2026-06-30】「签发参数」与「模型权限表达」相关决策被 [ADR-0016](0016-team-scoped-litellm-virtual-keys.md) 取代。**
+> 现状：签发恒下发 `team_id: <uuid>`（由 `default_team_alias` 经 `/team/list` 解析），`models` 字段不下发，team 的 models 列表是模型权限单一真相源。
+> 仍生效：key 角色分离（Master/User）、User:Key=1:1、防双签三重防护（Redis 锁 + DB 唯一约束 + 冲突回删）、自愈轮换、`max_budget` 保险丝、生命周期 v1 范围、Admin/Proxy 双客户端 + service 层解析 + Redis 缓存。
+> 修订史保留全文作为决策快照，不删。
+
 **补强 ADR-0005（网关自拥窗口记账）、ADR-0008（计量与窗口强制）。不推翻二者：网关侧滚动窗口仍是权威限额。**
 
 ADR-0005 让 litellm 退化为「上游模型路由器 + 供应商 key 持有方」，全网关共用**一把** virtual key（`internal/litellm/client.go` 构造期注入），按用户的限额全在网关侧做（5h 滚动窗 + 周窗 + Credit）。它当时**否决**了「litellm 原生 virtual key + budget」，理由是 litellm 预算基于日历周期、表达不了滚动窗——该理由今天仍成立。

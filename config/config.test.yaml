@@ -24,5 +24,9 @@ oauth:
   gw_code_ttl: "60s"
   authz_ttl: "10m"
 
+# LLM 代理（ADR-0016）：test 环境也要配 default_team_alias（validate 强制必填），实际联调按需指向真实 litellm。
+llm:
+  default_team_alias: "team-pro"
+
 scaffold:
   enabled: true

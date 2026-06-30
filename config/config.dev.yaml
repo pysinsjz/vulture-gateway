@@ -34,6 +34,10 @@ auth:
   # dev 万能验证码：登录页验证码填 111111 即直接通过校验（免去查真实码，便于手动登录）。
   # 仅 dev/test 生效；prod/staging 配置此项会启动失败（config.validate 硬阻止）。
   dev_otp_bypass_code: "111111"
+  # dev 明文密码旁路：密码托管页在非安全上下文（非 https://、非 localhost）时直接发 plain_password。
+  # 网关用持有的 RSA 公钥就地加密喂给 service，service 层零改动。仅 dev/test 生效；
+  # prod/staging 开启会启动失败（config.validate 硬阻止）。生产部署务必走 https://。
+  allow_plaintext_password: true
 # 启用真实 SMTP 邮件验证码示例（取消注释并经 VG_ 注入 password，与上面 auth 段合并）：
 # auth:
 #   providers:
@@ -57,7 +61,7 @@ clawhub:
 llm:
   base_url: "http://47.110.248.193:4000"
   master_key: "sk-2e2c4c66bbc2dbcae046637d06312630f1c8367bdab4fee4701712f088ab391b"            # litellm 管理员 key（VG_LLM_MASTER_KEY 注入；dev 留空＝本地无鉴权）
-  model_access_group: "vulture"  # 签发用户 key 时下发的 litellm model access group 名（ADR-0014 修订）；组成员在 litellm 侧维护，默认 vulture
+  default_team_alias: "team-pro"  # ADR-0016：签发归属的 litellm team 别名；dev 实例 team-pro UUID = a7e93ef5-f00f-4737-9d17-4148acbec528
   vkey_cache_ttl: "1h"      # 用户 virtual key 的 Redis 缓存寿命（DB 为真相源）
   timeout: "30s"
   stream_idle_timeout: "120s"   # 流式推理 chunk 间空闲上限（#24 / ADR-0008）

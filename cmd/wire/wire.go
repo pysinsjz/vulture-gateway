@@ -150,7 +150,7 @@ func WireApp(cfg *config.Configuration, opts ...Option) (*App, error) {
 	// 用户 virtual key get-or-create：DB 真相源 + Redis 缓存热路径 + 复用 auth.Locker 做分布式锁防双签。
 	vkeyDAO := dao.NewUserVirtualKeyDAO(gdb)
 	vkeyCache := service.NewRedisVKeyCache(rdb, cfg.LLM.VKeyCacheTTL)
-	virtualKeyService := service.NewVirtualKeyService(vkeyDAO, llmAdminClient, vkeyCache, locker, cfg.LLM.ModelAccessGroup)
+	virtualKeyService := service.NewVirtualKeyService(vkeyDAO, llmAdminClient, vkeyCache, locker, cfg.LLM.DefaultTeamAlias)
 	llmService := service.NewLLMService(llmClient, virtualKeyService)
 	// 订阅检查为占位（#25）：active = !StubNoSubscription，待计费 C 域接入真实 Subscription。
 	subChecker := service.NewStubSubscriptionChecker(!cfg.LLM.StubNoSubscription)
@@ -169,11 +169,11 @@ func WireApp(cfg *config.Configuration, opts ...Option) (*App, error) {
 	probeHandler := handler.NewProbeHandler(identityDAO)
 	scaffoldHandler := handler.NewScaffoldHandler(signer, tvs)
 	oauthHandler := handler.NewOAuthHandler(authzStore, gwCodeStore, userDAO, oauthService, cfg.OAuth.ClientID)
-	loginHandler := handler.NewLoginHandler(signinRegistry, otpService, authzStore, gwCodeStore, userDAO, virtualKeyService, rsaDecryptor, csrfStore)
+	loginHandler := handler.NewLoginHandler(signinRegistry, otpService, authzStore, gwCodeStore, userDAO, virtualKeyService, rsaDecryptor, csrfStore, cfg.Auth.AllowPlaintextPassword)
 	// 设/改密（ADR-0015 / #39、#40）：service 编排解密+策略+（改密）pwreset 验码+失败限流+账号级写入；
 	// handler 承接 Bearer 铸链、托管页与改密发码。otp/limiter 复用登录链路同一组件。
 	passwordService := service.NewPasswordService(identityDAO, hasher, rsaDecryptor, transactor, otpStore, rateLimiter)
-	passwordHandler := handler.NewPasswordHandler(passwordService, otpService, passwordLinkStore, csrfStore, rsaDecryptor, cfg.OAuth.GatewayBaseURL)
+	passwordHandler := handler.NewPasswordHandler(passwordService, otpService, passwordLinkStore, csrfStore, rsaDecryptor, cfg.OAuth.GatewayBaseURL, cfg.Auth.AllowPlaintextPassword)
 	deviceHandler := handler.NewDeviceHandler(signer, deviceService)
 	// 下载代理（interim）：把内网 ClawHub 制品字节经网关回传桌面端（路线 A 伪预签名）。客户端无超时，
 	// 由请求 ctx 约束生命周期；待 ClawHub 路线 B（MinIO 真预签名、公网可达）落地后改回直接 302。

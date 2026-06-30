@@ -31,7 +31,7 @@ oauth:
 llm:
   base_url: "https://litellm-0w6x.srv1477684.hstgr.cloud"
   master_key: ""
-  model_access_group: "vulture"  # 签发用户 key 时下发的 litellm model access group 名（ADR-0014 修订）；组成员在 litellm 侧维护
+  default_team_alias: "team-free"  # ADR-0016：prod 默认归属 team-free；team UUID 在 prod litellm 实例配置，签发前 /team/list 解析
   vkey_cache_ttl: "1h"
 
 scaffold:
