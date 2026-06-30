@@ -1,8 +1,10 @@
 package router_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -761,6 +763,216 @@ func TestImageGenerations_WindowExceededByChat429(t *testing.T) {
 	rec := do(t, e, http.MethodPost, "/v1/images/generations", token, imageReq())
 	if rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("窗口已满 images 应 429, 实际 %d: %s", rec.Code, rec.Body.String())
+	}
+	assertOpenAIError(t, rec, "usage_window_exceeded")
+}
+
+// ===== 图片编辑（/v1/images/edits）=====
+
+// buildImageEditsBody 构造一个最小可用的 multipart/form-data 请求体，包含 image/prompt/model/size 等字段。
+// 返回 body 字节与 Content-Type（含 boundary）——后者必须随请求头一同发出，否则上游无法解多部分。
+func buildImageEditsBody(t *testing.T) ([]byte, string) {
+	t.Helper()
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	imagePart, err := mw.CreateFormFile("image", "input.png")
+	if err != nil {
+		t.Fatalf("CreateFormFile: %v", err)
+	}
+	if _, err := imagePart.Write([]byte("\x89PNG\r\n\x1a\nfake-png-bytes")); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+	for k, v := range map[string]string{
+		"prompt": "make it look like a painting",
+		"model":  "gpt-image-1",
+		"n":      "1",
+		"size":   "1024x1024",
+	} {
+		if err := mw.WriteField(k, v); err != nil {
+			t.Fatalf("WriteField %s: %v", k, err)
+		}
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatalf("multipart close: %v", err)
+	}
+	return buf.Bytes(), mw.FormDataContentType()
+}
+
+// doRaw 走与 do() 同口径的请求构造，但允许传入原始 body 与自定义 Content-Type（multipart 等非 JSON 场景）。
+func doRaw(t *testing.T, e *gin.Engine, method, path, bearer, contentType string, body []byte) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, path, bytes.NewReader(body))
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+	return rec
+}
+
+// stubImageEdits 返回 200 + 标准 OpenAI 图片响应的桩 litellm，记录命中次数、Authorization、Content-Type 与回放 body
+// 长度（验证 multipart 边界透传）。
+type stubImageEditsCapture struct {
+	hits         int32
+	gotAuth      string
+	gotCT        string
+	gotBodyBytes int
+	gotPath      string
+}
+
+func stubImageEdits(t *testing.T) (*httptest.Server, *stubImageEditsCapture) {
+	t.Helper()
+	cap := &stubImageEditsCapture{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&cap.hits, 1)
+		cap.gotAuth = r.Header.Get("Authorization")
+		cap.gotCT = r.Header.Get("Content-Type")
+		cap.gotPath = r.URL.Path
+		raw, _ := io.ReadAll(r.Body)
+		cap.gotBodyBytes = len(raw)
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Litellm-Call-Id", "edits-call-1")
+		w.Header().Set("X-Litellm-Response-Cost", "0.080")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"created":1700000001,"data":[{"url":"https://example.com/edit.png"}]}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, cap
+}
+
+// 正路：multipart body 200 JSON 透传 + 注入 virtual key + 剥成本头 + 保留 call-id + Content-Type/boundary 原样传给 litellm。
+func TestImageEdits_HappyPath(t *testing.T) {
+	srv, cap := stubImageEdits(t)
+	e := newLLMEngine(t, withLLM(srv.URL))
+	token := issueViaScaffold(t, e, "user-llm", "dev-llm")
+	body, ct := buildImageEditsBody(t)
+
+	rec := doRaw(t, e, http.MethodPost, "/v1/images/edits", token, ct, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("期望 200, 实际 %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"url":"https://example.com/edit.png"`) {
+		t.Errorf("响应体应原样透传, 实际 %s", rec.Body.String())
+	}
+	if atomic.LoadInt32(&cap.hits) != 1 {
+		t.Errorf("litellm 应命中 1 次, 实际 %d", atomic.LoadInt32(&cap.hits))
+	}
+	if cap.gotPath != "/v1/images/edits" {
+		t.Errorf("上游路径应为 /v1/images/edits, 实际 %q", cap.gotPath)
+	}
+	if cap.gotAuth != "Bearer test-vkey" {
+		t.Errorf("应注入 virtual key, 桩收到 Authorization=%q", cap.gotAuth)
+	}
+	// multipart Content-Type（含 boundary）必须原样传——否则上游无法解多部分。
+	if !strings.HasPrefix(cap.gotCT, "multipart/form-data") || !strings.Contains(cap.gotCT, "boundary=") {
+		t.Errorf("Content-Type 应为 multipart/form-data; boundary=..., 实际 %q", cap.gotCT)
+	}
+	if cap.gotBodyBytes != len(body) {
+		t.Errorf("body 应原样转发(%d B), 上游收到 %d B", len(body), cap.gotBodyBytes)
+	}
+	if rec.Header().Get("X-Litellm-Call-Id") != "edits-call-1" {
+		t.Error("x-litellm-call-id 应保留透传")
+	}
+	if rec.Header().Get("X-Litellm-Response-Cost") != "" {
+		t.Error("成本头应被剥除")
+	}
+}
+
+// 无 Bearer → 401（JWTAuthLLM 同时覆盖 chat/images/edits）。
+func TestImageEdits_NoTokenUnauthorized(t *testing.T) {
+	e := newTestEngine(t)
+	body, ct := buildImageEditsBody(t)
+	rec := doRaw(t, e, http.MethodPost, "/v1/images/edits", "", ct, body)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("无 token 期望 401, 实际 %d", rec.Code)
+	}
+	assertOpenAIError(t, rec, "unauthorized")
+}
+
+// 无活跃订阅 → 402 no_active_subscription，且不转发到 litellm。
+func TestImageEdits_NoSubscription402NotForwarded(t *testing.T) {
+	srv, cap := stubImageEdits(t)
+	e := newLLMEngine(t, withLLMNoSub(srv.URL))
+	token := issueViaScaffold(t, e, "user-llm", "dev-llm")
+	body, ct := buildImageEditsBody(t)
+
+	rec := doRaw(t, e, http.MethodPost, "/v1/images/edits", token, ct, body)
+	if rec.Code != http.StatusPaymentRequired {
+		t.Fatalf("无订阅期望 402, 实际 %d: %s", rec.Code, rec.Body.String())
+	}
+	assertOpenAIError(t, rec, "no_active_subscription")
+	if n := atomic.LoadInt32(&cap.hits); n != 0 {
+		t.Errorf("无订阅不应转发, 实际命中 %d", n)
+	}
+}
+
+// 请求体 >上限 → 413 request_too_large，且不转发。
+func TestImageEdits_RequestTooLarge413(t *testing.T) {
+	srv, cap := stubImageEdits(t)
+	body, ct := buildImageEditsBody(t)
+	e := newLLMEngine(t, withLLMMaxBytes(srv.URL, int64(len(body))-1))
+	token := issueViaScaffold(t, e, "user-llm", "dev-llm")
+
+	rec := doRaw(t, e, http.MethodPost, "/v1/images/edits", token, ct, body)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("超限期望 413, 实际 %d: %s", rec.Code, rec.Body.String())
+	}
+	assertOpenAIError(t, rec, "request_too_large")
+	if n := atomic.LoadInt32(&cap.hits); n != 0 {
+		t.Errorf("超限不应转发, 实际命中 %d", n)
+	}
+}
+
+// litellm 不可达 → OpenAI 形态 502 upstream_unavailable。
+func TestImageEdits_UpstreamUnreachable(t *testing.T) {
+	e := newLLMEngine(t, withLLM("http://127.0.0.1:1"))
+	token := issueViaScaffold(t, e, "u", "d")
+	body, ct := buildImageEditsBody(t)
+
+	rec := doRaw(t, e, http.MethodPost, "/v1/images/edits", token, ct, body)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("期望 502, 实际 %d: %s", rec.Code, rec.Body.String())
+	}
+	assertOpenAIError(t, rec, "")
+}
+
+// 上游错误：litellm 返 400 → 网关原样透传状态码与体。
+func TestImageEdits_UpstreamErrorPassthrough(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"unsupported size","type":"invalid_request_error","code":"size_not_supported"}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	e := newLLMEngine(t, withLLM(srv.URL))
+	token := issueViaScaffold(t, e, "user-llm", "dev-llm")
+	body, ct := buildImageEditsBody(t)
+
+	rec := doRaw(t, e, http.MethodPost, "/v1/images/edits", token, ct, body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("应透传上游 400, 实际 %d", rec.Code)
+	}
+	assertOpenAIError(t, rec, "size_not_supported")
+}
+
+// 跨端点窗口共享：chat 把 5h 窗打满 → 后续 images/edits 也被同窗预检拦截 429。
+func TestImageEdits_WindowExceededByChat429(t *testing.T) {
+	srv, _ := stubChatJSON(t) // 每次 usage=prompt2+completion1 → 3 Credit
+	e := newLLMEngine(t, withLLM5hCap(srv.URL, 3))
+	token := issueViaScaffold(t, e, "user-llm", "dev-llm")
+
+	if rec := do(t, e, http.MethodPost, "/v1/chat/completions", token, chatReq()); rec.Code != http.StatusOK {
+		t.Fatalf("首发 chat 应放行 200, 实际 %d", rec.Code)
+	}
+
+	body, ct := buildImageEditsBody(t)
+	rec := doRaw(t, e, http.MethodPost, "/v1/images/edits", token, ct, body)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("窗口已满 image edits 应 429, 实际 %d: %s", rec.Code, rec.Body.String())
 	}
 	assertOpenAIError(t, rec, "usage_window_exceeded")
 }

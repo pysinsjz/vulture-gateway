@@ -219,6 +219,73 @@ func (h *LLMHandler) forwardImages(ctx context.Context, userUUID string, body []
 	return retry, nil
 }
 
+// ImageEdits 代理 litellm 图片编辑（POST /v1/images/edits）：
+// 与 /v1/images/generations 同款门禁顺序（鉴权→订阅 402→请求体 413→窗口预检 429→转发）+ 401/403 一次性自愈轮换。
+// 关键差异：edits 走 multipart/form-data，必须把上游 Content-Type（含 boundary）透传给 litellm，
+// 否则 litellm 无法解多部分。计量与 generations 一致 park：图片无 token usage，待 per-image Credit 定价落地后补。
+func (h *LLMHandler) ImageEdits(c *gin.Context) {
+	userUUID := c.GetString(middleware.CtxKeySub)
+	active, err := h.sub.HasActiveSubscription(c.Request.Context(), userUUID)
+	if err != nil {
+		apierror.AbortOpenAI(c, http.StatusBadGateway, apierror.OpenAITypeInvalidRequest, "subscription_check_failed", "订阅状态暂不可用")
+		return
+	}
+	if !active {
+		apierror.AbortOpenAI(c, http.StatusPaymentRequired, apierror.OpenAITypeSubscriptionError, "no_active_subscription", "No active subscription. Subscribe to a plan to use the model.")
+		return
+	}
+
+	if c.Request.ContentLength > h.maxRequestBytes {
+		h.abortRequestTooLarge(c)
+		return
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, h.maxRequestBytes))
+	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			h.abortRequestTooLarge(c)
+			return
+		}
+		apierror.AbortOpenAI(c, http.StatusBadRequest, apierror.OpenAITypeInvalidRequest, "invalid_request_error", "无法读取请求体")
+		return
+	}
+
+	if pre, perr := h.meter.Precheck(c.Request.Context(), userUUID, time.Now()); perr == nil && pre.Exceeded {
+		writeWindowExceeded(c, pre)
+		return
+	}
+
+	contentType := c.Request.Header.Get("Content-Type")
+	res, err := h.forwardImageEdits(c.Request.Context(), userUUID, body, contentType)
+	if err != nil {
+		apierror.AbortOpenAI(c, http.StatusBadGateway, apierror.OpenAITypeInvalidRequest, "upstream_unavailable", "图片服务暂时不可用")
+		return
+	}
+
+	litellm.CopySafeHeaders(c.Writer.Header(), res.Header)
+	c.Status(res.Status)
+	_, _ = c.Writer.Write(res.Body)
+}
+
+// forwardImageEdits 转发图片编辑请求并复用 401/403 一次性自愈轮换（同步 JSON，无部分写入风险）。
+func (h *LLMHandler) forwardImageEdits(ctx context.Context, userUUID string, body []byte, contentType string) (*litellm.ProxyResult, error) {
+	res, err := h.svc.ImageEdits(ctx, userUUID, body, contentType)
+	if err != nil {
+		return nil, err
+	}
+	if res.Status != http.StatusUnauthorized && res.Status != http.StatusForbidden {
+		return res, nil
+	}
+	if healErr := h.svc.RegenerateVirtualKey(ctx, userUUID); healErr != nil {
+		return res, nil
+	}
+	retry, err := h.svc.ImageEdits(ctx, userUUID, body, contentType)
+	if err != nil {
+		return nil, err
+	}
+	return retry, nil
+}
+
 // QianwenMultimodalGeneration 代理 litellm DashScope 透传端点（千问图片/多模态生成）：
 //
 //	POST /qianwenai/api/v1/services/aigc/multimodal-generation/generation  (Bearer)

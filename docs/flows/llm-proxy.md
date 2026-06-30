@@ -18,7 +18,7 @@ litellm proxy ──→ 各模型供应商
 
 ## 1. 对接约定
 
-- **端点**：`POST /v1/chat/completions`（推理）、`GET /v1/models`（模型列表）、`POST /v1/images/generations`（图片生成）。后续可按需开 `/v1/embeddings` 等，同样代理形态。全局约定见 [api-conventions.md](./api-conventions.md)。
+- **端点**：`POST /v1/chat/completions`（推理）、`GET /v1/models`（模型列表）、`POST /v1/images/generations`（图片生成）、`POST /v1/images/edits`（图片编辑，multipart）。后续可按需开 `/v1/embeddings` 等，同样代理形态。全局约定见 [api-conventions.md](./api-conventions.md)。
 - **鉴权**：`Authorization: Bearer <网关 access JWT>`（同其他 API，见 auth.md）。网关换成**该用户专属的** litellm virtual key 转发（按用户 1:1 签发，归因 + 纵深防御保险丝，限额权威仍在网关窗口；ADR-0014）——**桌面端永远拿不到 litellm key**。库里 key 被 litellm 拒（401/403）时网关一次性自愈轮换并重试。
 - **协议**：请求/响应体为 OpenAI 格式；流式为 SSE（`data: {...}\n\n`，终止 `data: [DONE]`）；多模态走标准 message content（image_url/base64）。
 - **请求体上限**：整体请求体（含多模态 base64）≤ **25MB**；超限 ⇒ `413` + OpenAI 错误体 `code:"request_too_large"`。当前上限经 bootstrap 的 `max_upload_mb` flag 广播，桌面端可预检。
@@ -131,6 +131,24 @@ interface ImageRequest {
 - **窗口预检与 chat 共享**——chat 把窗口打满会同时阻断 images 请求（同账号同窗口口径一致）。
 - **计量当前未写入图片用量**：图片接口无 token usage，按图片数量折算 Credit 需待图片 Model Price 接入（见 §6 / Park）。换言之，**图片请求会受窗口阻断但不会增厚窗口**——这是有意为之的占位态，等定价落地后再补。
 
+### 3a.1 图片编辑（multipart）
+
+**`POST /v1/images/edits`**（Bearer）—— 网关代理 litellm 的同名端点，**multipart/form-data**：
+
+```
+Content-Type: multipart/form-data; boundary=...
+
+image    : (file)  必填；待编辑原图（PNG/WebP）。gpt-image-1 支持多张。
+prompt   : (text)  必填；编辑指令。
+mask     : (file)  可选；透明区指示要重绘的位置。
+model    : (text)  如 gpt-image-1 / dall-e-2。
+n / size / response_format / user / quality / background ...  其余 OpenAI 字段原样透传。
+```
+
+- **关键差异（vs. generations）**：multipart 请求体含二进制图字节，网关把上游 `Content-Type`（含 `boundary=...`）**原样**透传给 litellm；若被改写则上游解多部分失败。
+- 响应形态与 generations 完全一致：同步 JSON `{"created":..., "data":[{"url":"..."} | {"b64_json":"..."}]}`。
+- 门禁顺序、virtual key 注入、401/403 自愈轮换、窗口预检共享、计量 park 一律同 §3a。25MB 请求体上限对带图请求同样适用——超大图需客户端先裁剪/压缩。
+
 ---
 
 ## 4. 触顶阻断（429，贴 litellm/OpenAI 惯例）
@@ -208,5 +226,5 @@ litellm 错误（OpenAI 形态 `{"error":{message,type,param,code}}`）原样透
 ## Park / 待定
 
 - **窗口上限数值与 Model Price 定价**——等产品文档（已 park，见记忆）。
-- **图片生成的 Credit 计价**——`/v1/images/generations` 已开通转发，但 per-image Credit 折算尚未接入（见 §3a），等图片定价落地后在 `MeteringService` 加 image-pricing 写入。
+- **图片生成的 Credit 计价**——`/v1/images/generations`、`/v1/images/edits` 已开通转发，但 per-image Credit 折算尚未接入（见 §3a / §3a.1），等图片定价落地后在 `MeteringService` 加 image-pricing 写入。
 - `/v1/embeddings`、`/v1/audio/*` 等其他 litellm 端点是否开放——按桌面端需求逐个加。

@@ -104,6 +104,7 @@ func NewRouter(
 		llmGroup.GET("/models", llm.ListModels)
 		llmGroup.POST("/chat/completions", llm.ChatCompletions)    // 流式推理 SSE + include_usage 注入 + 双超时（#24）
 		llmGroup.POST("/images/generations", llm.ImageGenerations) // 图片生成代理（同步 JSON，门禁同 chat；图片计价 park 待接入）
+		llmGroup.POST("/images/edits", llm.ImageEdits)             // 图片编辑代理（multipart/form-data 透传 Content-Type；计价同 park）
 	}
 
 	// 千问 DashScope 透传族：路径与 litellm 1:1 镜像，桌面端只需把 host 换成网关。
