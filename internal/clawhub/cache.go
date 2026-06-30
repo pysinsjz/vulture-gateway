@@ -78,6 +78,25 @@ func cachedGet[T any](ctx context.Context, c *cache, endpoint, key string, fn fu
 	return v.(*T), nil
 }
 
+// cachedGetSlice 是 cachedGet 的 slice 适配器：缓存层只持指针，slice 用一层 wrap 转回。
+// 用于无参数、返回 []T 的 ClawHub 端点（如分类字典）。
+func cachedGetSlice[T any](ctx context.Context, c *cache, endpoint, key string, fn func(context.Context) ([]T, error)) ([]T, error) {
+	type wrap struct {
+		Items []T `json:"items"`
+	}
+	v, err := cachedGet(ctx, c, endpoint, key, func(ctx context.Context) (*wrap, error) {
+		items, err := fn(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return &wrap{Items: items}, nil
+	})
+	if err != nil || v == nil {
+		return nil, err
+	}
+	return v.Items, nil
+}
+
 // cacheGet 从 Redis 读并 JSON 反序列化。命中返回 (value, true)；miss/超时/反序列化失败返回 (_, false)。
 // 错误统一记 WARN（不静默），让运维 grep 得到 Redis 异常。
 func cacheGet[T any](parent context.Context, rdb *redis.Client, endpoint, key string) (*T, bool) {

@@ -10,7 +10,8 @@ import (
 )
 
 // cachingPackagesClient 是 PackagesClient 的 raw 响应缓存装饰器。
-// 缓存方法：ListPackages / GetPackage（覆盖 plugins list / categories / detail 三个对外端点）。
+// 缓存方法：ListPackages / GetPackage / ListPluginCategoriesDictionary
+// （覆盖 plugins list / detail / categories 三个对外端点的上游数据源）。
 // 其余方法（版本历史、版本详情、下载、security）原样透传——见设计访谈 Q3。
 type cachingPackagesClient struct {
 	inner PackagesClient
@@ -57,6 +58,14 @@ func (c *cachingPackagesClient) PackageArtifactStreamURL(name, version string) s
 
 func (c *cachingPackagesClient) PackageSecurity(ctx context.Context, name, version string) (*PluginTrust, error) {
 	return c.inner.PackageSecurity(ctx, name, version)
+}
+
+// ListPluginCategoriesDictionary 复用 clawhub.cache_ttl（无参，key 固定）。
+// cache_ttl=0 时整层短路（同 ListPackages）；用 cachedGetSlice 适配 []T 形态。
+func (c *cachingPackagesClient) ListPluginCategoriesDictionary(ctx context.Context) ([]CategoryDict, error) {
+	return cachedGetSlice(ctx, c.c, "category_dict_plugin", "category_dict_plugin", func(ctx context.Context) ([]CategoryDict, error) {
+		return c.inner.ListPluginCategoriesDictionary(ctx)
+	})
 }
 
 // packagesListQuery 把 ListParams 编码为缓存键的明文 query 段（url.Values 自带字典序），

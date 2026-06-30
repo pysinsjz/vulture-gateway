@@ -36,16 +36,19 @@ type SkillVersionSummary struct {
 }
 
 // SkillListItem 是 ClawHub 内部 skill 列表项。category 为 fork 原生字段（§5），网关透传。
+// SkillCategorySlug 为 issue #44 引入的运营分类清单归属 slug；ClawHub#3 上线前响应里
+// 缺失为空字符串，service 聚合时落 `other` 桶。
 type SkillListItem struct {
-	Slug          string               `json:"slug"`
-	DisplayName   string               `json:"displayName"`
-	Summary       string               `json:"summary,omitempty"`
-	Category      *Category            `json:"category"`
-	Tags          map[string]string    `json:"tags"`
-	CreatedAt     int64                `json:"createdAt"`
-	UpdatedAt     int64                `json:"updatedAt"`
-	LatestVersion *SkillVersionSummary `json:"latestVersion"`
-	Metadata      *SkillMetadata       `json:"metadata"`
+	Slug             string               `json:"slug"`
+	DisplayName      string               `json:"displayName"`
+	Summary          string               `json:"summary,omitempty"`
+	Category         *Category            `json:"category"`
+	SkillCategorySlug string              `json:"skillCategorySlug,omitempty"`
+	Tags             map[string]string    `json:"tags"`
+	CreatedAt        int64                `json:"createdAt"`
+	UpdatedAt        int64                `json:"updatedAt"`
+	LatestVersion    *SkillVersionSummary `json:"latestVersion"`
+	Metadata         *SkillMetadata       `json:"metadata"`
 }
 
 // SkillInfo 是 skill 详情的元信息块。
@@ -184,4 +187,14 @@ func (c *httpClient) SkillDownloadStreamURL(slug, version string) string {
 	q.Set("slug", slug)
 	setIfNotEmpty(q, "version", version)
 	return c.baseURL + "/download?" + q.Encode()
+}
+
+func (c *httpClient) ListSkillCategoriesDictionary(ctx context.Context) ([]CategoryDict, error) {
+	var resp struct {
+		Categories []CategoryDict `json:"categories"`
+	}
+	if err := c.get(ctx, "/skills/categories", nil, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Categories, nil
 }

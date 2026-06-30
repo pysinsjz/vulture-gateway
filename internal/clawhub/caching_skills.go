@@ -10,7 +10,8 @@ import (
 )
 
 // cachingSkillsClient 是 SkillsClient 的 raw 响应缓存装饰器。
-// 缓存方法：ListSkills / GetSkill（覆盖 skills list / categories / detail 三个对外端点）。
+// 缓存方法：ListSkills / GetSkill / ListSkillCategoriesDictionary
+// （覆盖 skills list / detail / categories 三个对外端点的上游数据源）。
 // 其余方法（版本历史、版本详情、resolve、下载、verdicts）原样透传——见设计访谈 Q3。
 type cachingSkillsClient struct {
 	inner SkillsClient
@@ -57,6 +58,14 @@ func (c *cachingSkillsClient) SkillDownloadStreamURL(slug, version string) strin
 
 func (c *cachingSkillsClient) SecurityVerdicts(ctx context.Context, items []VerdictRequestItem) (*SecurityVerdictResult, error) {
 	return c.inner.SecurityVerdicts(ctx, items)
+}
+
+// ListSkillCategoriesDictionary 复用 clawhub.cache_ttl（无参，key 固定）。
+// cache_ttl=0 时整层短路（同 ListSkills）；用 cachedGetSlice 适配 []T 形态。
+func (c *cachingSkillsClient) ListSkillCategoriesDictionary(ctx context.Context) ([]CategoryDict, error) {
+	return cachedGetSlice(ctx, c.c, "category_dict_skill", "category_dict_skill", func(ctx context.Context) ([]CategoryDict, error) {
+		return c.inner.ListSkillCategoriesDictionary(ctx)
+	})
 }
 
 // skillsListQuery 把 SkillListParams 编码为缓存键的明文 query 段（url.Values 自带字典序），

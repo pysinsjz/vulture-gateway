@@ -26,23 +26,26 @@ type PackagePage struct {
 
 // PackageListItem 是 ClawHub 内部 plugin 列表项的原始形态。
 //   - pluginCategory：ClawHub 承载浏览分类的原生字段，网关翻译为对外 category。
+//   - PluginCategorySlug：制品在运营分类清单里的归属 slug（issue #44 引入；
+//     ClawHub#3 上线前响应里缺失为空字符串 → service 聚合时落 `other` 桶）。
 //   - HostTargets / MinAppVersion：网关 fetch-then-filter 所需的兼容元数据，
 //     仅用于过滤、不外露（对外 PluginListItem 不含）。
 type PackageListItem struct {
-	Name             string    `json:"name"`
-	DisplayName      string    `json:"displayName"`
-	Summary          string    `json:"summary,omitempty"`
-	PluginCategory   *Category `json:"pluginCategory"`
-	Family           string    `json:"family"`
-	Channel          string    `json:"channel"`
-	IsOfficial       bool      `json:"isOfficial"`
-	LatestVersion    string    `json:"latestVersion,omitempty"`
-	CapabilityTags   []string  `json:"capabilityTags,omitempty"`
-	ExecutesCode     *bool     `json:"executesCode,omitempty"`
-	VerificationTier string    `json:"verificationTier,omitempty"`
-	ScanStatus       string    `json:"scanStatus,omitempty"`
-	HostTargets      []string  `json:"hostTargets,omitempty"`
-	MinAppVersion    string    `json:"minAppVersion,omitempty"`
+	Name               string    `json:"name"`
+	DisplayName        string    `json:"displayName"`
+	Summary            string    `json:"summary,omitempty"`
+	PluginCategory     *Category `json:"pluginCategory"`
+	PluginCategorySlug string    `json:"pluginCategorySlug,omitempty"`
+	Family             string    `json:"family"`
+	Channel            string    `json:"channel"`
+	IsOfficial         bool      `json:"isOfficial"`
+	LatestVersion      string    `json:"latestVersion,omitempty"`
+	CapabilityTags     []string  `json:"capabilityTags,omitempty"`
+	ExecutesCode       *bool     `json:"executesCode,omitempty"`
+	VerificationTier   string    `json:"verificationTier,omitempty"`
+	ScanStatus         string    `json:"scanStatus,omitempty"`
+	HostTargets        []string  `json:"hostTargets,omitempty"`
+	MinAppVersion      string    `json:"minAppVersion,omitempty"`
 }
 
 // Compatibility 是制品兼容性元数据（plugin detail/version 携带，§3.7 桌面端装前自检）。
@@ -195,4 +198,14 @@ func (c *httpClient) PackageDownloadStreamURL(name, version string) string {
 
 func (c *httpClient) PackageArtifactStreamURL(name, version string) string {
 	return c.baseURL + "/packages/" + url.PathEscape(name) + "/versions/" + url.PathEscape(version) + "/artifact/download"
+}
+
+func (c *httpClient) ListPluginCategoriesDictionary(ctx context.Context) ([]CategoryDict, error) {
+	var resp struct {
+		Categories []CategoryDict `json:"categories"`
+	}
+	if err := c.get(ctx, "/plugins/categories", nil, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Categories, nil
 }

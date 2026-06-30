@@ -39,6 +39,9 @@ type PackagesClient interface {
 	// PackageSecurity 调用 ClawHub GET /packages/{name}/releases/{version}/security，
 	// 返回 PluginTrust（blockedFromDownload 为权威阻断信号，#22）。
 	PackageSecurity(ctx context.Context, name, version string) (*PluginTrust, error)
+	// ListPluginCategoriesDictionary 调用 ClawHub GET /plugins/categories，返回 plugin 族
+	// 运营分类清单（已源头按 order 升序、archived 过滤）。网关侧聚合 categories 端点使用。
+	ListPluginCategoriesDictionary(ctx context.Context) ([]CategoryDict, error)
 }
 
 // SkillsClient 抽象内网 ClawHub 的 skill（skills/skillVersions）只读契约。
@@ -59,6 +62,9 @@ type SkillsClient interface {
 	SkillDownloadStreamURL(slug, version string) string
 	// SecurityVerdicts 调用 ClawHub POST /skills/-/security-verdicts，批量（1–100）返回安全裁决（#22）。
 	SecurityVerdicts(ctx context.Context, items []VerdictRequestItem) (*SecurityVerdictResult, error)
+	// ListSkillCategoriesDictionary 调用 ClawHub GET /skills/categories，返回 skill 族
+	// 运营分类清单（已源头按 order 升序、archived 过滤）。网关侧聚合 categories 端点使用。
+	ListSkillCategoriesDictionary(ctx context.Context) ([]CategoryDict, error)
 }
 
 // TelemetryClient 抽象内网 ClawHub 的安装遥测上报契约（§3.8）。
@@ -84,6 +90,20 @@ type PageParams struct {
 type Category struct {
 	ID    string `json:"id"`
 	Label string `json:"label"`
+}
+
+// CategoryDict 是运营维护的分类清单项（plugin / skill 共用）。
+//
+// 来源：ClawHub GET /{plugins,skills}/categories 公开 query，响应已在源头按 order
+// 升序、archived 过滤；故 Archived 在生产链路上恒为 false。保留该字段是为了：
+//   - 让 service 层的"过滤 archived"防御逻辑可被 fake 单测覆盖；
+//   - 与 PRD/issue body 的 service-layer 语义对齐（ADR 一致性）；
+//   - 未来若 ClawHub 暴露 management query 给网关，无需改类型。
+type CategoryDict struct {
+	Slug     string `json:"slug"`
+	Label    string `json:"label"`
+	Order    int    `json:"order"`
+	Archived bool   `json:"archived,omitempty"`
 }
 
 // Error 表示 ClawHub 返回的非 2xx 响应。Status 用于网关侧错误重映射（ADR-0011）。
