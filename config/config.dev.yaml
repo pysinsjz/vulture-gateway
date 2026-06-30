@@ -55,6 +55,9 @@ auth:
 clawhub:
   base_url: "http://127.0.0.1:3211/api/v1"
   timeout: "10s"
+  # 列表/详情缓存寿命（缓解桌面端拉取延迟）。默认 5m；联调时可改 "10s" 让 ClawHub 数据变更尽快可见；
+  # 设为 "0s" 直接禁用缓存（紧急止血用）。覆盖端点：plugin/skill 的 list/categories/detail。
+  cache_ttl: "5m"
 
 # LLM 代理（litellm proxy，ADR-0005/0014）：网关鉴权后转发，按用户注入专属 virtual key。
 # master_key 仅 Admin Client 用来签发/删用户 key（永不转发推理），建议用 VG_LLM_MASTER_KEY 覆盖；dev 本地无鉴权 litellm 可留空。

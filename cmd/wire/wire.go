@@ -139,8 +139,13 @@ func WireApp(cfg *config.Configuration, opts ...Option) (*App, error) {
 	deviceService := service.NewDeviceService(tvs, deviceDAO, refreshDAO)
 
 	clawHubClient := clawhub.NewHTTPClient(cfg.ClawHub.BaseURL, &http.Client{Timeout: cfg.ClawHub.Timeout})
-	pluginService := service.NewPluginService(clawHubClient)
-	skillService := service.NewSkillService(clawHubClient)
+	// Raw 响应缓存（Redis）包装在 hub 层：plugins/skills list+detail 命中可秒返，缓解桌面端拉取延迟。
+	// cache_ttl=0 时装饰器内部短路（直接透传 inner），用于紧急止血。fail-open / singleflight / jitter
+	// 见 internal/clawhub/cache.go。
+	packagesClient := clawhub.NewCachingPackagesClient(clawHubClient, rdb, cfg.ClawHub.CacheTTL)
+	skillsClient := clawhub.NewCachingSkillsClient(clawHubClient, rdb, cfg.ClawHub.CacheTTL)
+	pluginService := service.NewPluginService(packagesClient)
+	skillService := service.NewSkillService(skillsClient)
 	telemetryService := service.NewTelemetryService(clawHubClient)
 
 	// ADR-0014：Proxy/Admin 双客户端角色分离。Proxy 转发推理（每用户注入 virtual key）；

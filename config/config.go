@@ -100,6 +100,10 @@ type LLMConfig struct {
 type ClawHubConfig struct {
 	BaseURL string        `mapstructure:"base_url"` // 内网基址，如 http://clawhub.internal:3210
 	Timeout time.Duration `mapstructure:"timeout"`  // 转发请求超时，默认 10s
+	// CacheTTL 是 plugin/skill 列表与详情的 Redis 缓存寿命（缓解桌面端拉取延迟）。
+	// 缓存范围：ListPackages / GetPackage / ListSkills / GetSkill 四个 hub 调用的 raw 响应；
+	// categories 端点内部复用 List* 也间接命中。默认 5m；约定 0s = 禁用缓存（紧急止血用）。
+	CacheTTL time.Duration `mapstructure:"cache_ttl"`
 }
 
 // PostgresConfig 数据库连接（ADR-0001：用 PostgreSQL，非 web-go 默认的 MySQL）。
@@ -250,6 +254,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("auth.csrf_ttl", "10m")
 	v.SetDefault("clawhub.base_url", "http://127.0.0.1:3211/api/v1")
 	v.SetDefault("clawhub.timeout", "10s")
+	v.SetDefault("clawhub.cache_ttl", "5m") // 列表/详情 Redis 缓存默认 5m；0s 禁用
 	v.SetDefault("llm.base_url", "http://127.0.0.1:4000")
 	// llm.default_team_alias 无默认值：必须各环境 YAML 显式配置（ADR-0016 fail-loud 防漂移）。
 	v.SetDefault("llm.vkey_cache_ttl", "1h")
