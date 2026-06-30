@@ -34,6 +34,7 @@ const loginPageTmpl = `<!doctype html>
   <form id="loginForm" method="post" action="/oauth/login">
     <input type="hidden" name="lk" value="{{.LinkedState}}">
     <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+    <input type="hidden" id="plain_credential" name="plain_credential">
     <fieldset class="methods">
       {{range .Methods}}
       <label><input type="radio" name="method" value="{{.Name}}" data-code="{{.IsCode}}" {{if .Selected}}checked{{end}}> {{.Label}}</label>
@@ -61,6 +62,14 @@ const loginPageTmpl = `<!doctype html>
   var sendBtn = document.getElementById('sendCode');
   var idInput = document.getElementById('identifier');
   var msg = document.getElementById('msg');
+  var plainField = document.getElementById('plain_credential');
+
+  // WebCrypto 仅在安全上下文（https:// 或 http://localhost）暴露。非安全上下文 → 走服务端
+  // 明文旁路（plain_credential，AuthConfig.AllowPlaintextPassword）；旁路未开时由服务端给出可读拒绝。
+  // 验证码方式不受影响：本就明文提交。
+  function cryptoAvailable(){
+    return !!(window.isSecureContext && window.crypto && window.crypto.subtle);
+  }
 
   function selected(){ for (var i=0;i<radios.length;i++){ if (radios[i].checked) return radios[i]; } return null; }
   function isCode(){ var r = selected(); return !!r && r.dataset.code === 'true'; }
@@ -69,8 +78,16 @@ const loginPageTmpl = `<!doctype html>
     credLabel.textContent = code ? '验证码' : '密码';
     cred.type = code ? 'text' : 'password';
     cred.value = '';
+    plainField.value = '';
     sendBtn.style.display = code ? 'inline-block' : 'none';
+    msg.style.color = '';
     msg.textContent = '';
+    // 密码方式 + 非安全上下文：提示走明文旁路（仅 dev/test 网关支持）。
+    if (!code && !cryptoAvailable()){
+      msg.style.color = '#b45309';
+      msg.textContent = '当前为非安全上下文（HTTPS 或 localhost），将以明文密码提交（仅 dev/test 网关支持）。' +
+        '生产环境请通过 https:// 或 http://localhost 重新打开此页。';
+    }
   }
   for (var i=0;i<radios.length;i++){ radios[i].addEventListener('change', updateUI); }
   updateUI();
@@ -97,8 +114,14 @@ const loginPageTmpl = `<!doctype html>
   form.addEventListener('submit', async function(e){
     if (isCode()) return; // 验证码方式明文提交
     e.preventDefault();
-    try { cred.value = await encryptPassword(cred.value); }
-    catch (err) { msg.textContent = '加密失败，请更换浏览器或检查 HTTPS'; return; }
+    if (cryptoAvailable()){
+      try { cred.value = await encryptPassword(cred.value); }
+      catch (err) { msg.style.color = ''; msg.textContent = '加密失败：' + (err && err.message ? err.message : String(err)); return; }
+    } else {
+      // 非安全上下文：把明文搬到 plain_credential，credential 留空让服务端走旁路。
+      plainField.value = cred.value;
+      cred.value = '';
+    }
     HTMLFormElement.prototype.submit.call(form);
   });
 })();

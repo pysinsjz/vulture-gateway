@@ -37,6 +37,7 @@ const passwordPageTmpl = `<!doctype html>
     <input type="hidden" name="t" value="{{.Token}}">
     <input type="hidden" name="csrf" value="{{.CSRFToken}}">
     <input type="hidden" id="encrypted_password" name="encrypted_password">
+    <input type="hidden" id="plain_password" name="plain_password">
     <label class="field">账号
       <input id="identifier" value="{{.Identifier}}" autocomplete="username" readonly>
     </label>
@@ -66,6 +67,7 @@ const passwordPageTmpl = `<!doctype html>
   var pw = document.getElementById('password');
   var confirm = document.getElementById('confirm');
   var enc = document.getElementById('encrypted_password');
+  var plainField = document.getElementById('plain_password');
   var msg = document.getElementById('msg');
   var tok = form.querySelector('input[name="t"]').value;
 
@@ -75,6 +77,16 @@ const passwordPageTmpl = `<!doctype html>
     var key = await crypto.subtle.importKey('spki', b64ToBytes(pubB64), {name:'RSA-OAEP', hash:'SHA-256'}, false, ['encrypt']);
     var ct = await crypto.subtle.encrypt({name:'RSA-OAEP'}, key, new TextEncoder().encode(plain));
     return bufToB64(ct);
+  }
+  // WebCrypto 仅在安全上下文（https:// 或 http://localhost）暴露。非安全上下文 → 走服务端
+  // 明文旁路（plain_password，AuthConfig.AllowPlaintextPassword）；旁路未开时由服务端给出可读拒绝。
+  function cryptoAvailable(){
+    return !!(window.isSecureContext && window.crypto && window.crypto.subtle);
+  }
+  if (!cryptoAvailable()){
+    msg.style.color = '#b45309'; // amber：提示而非红色错误
+    msg.textContent = '当前为非安全上下文（HTTPS 或 localhost），将以明文密码提交（仅 dev/test 网关支持）。' +
+      '生产环境请通过 https:// 或 http://localhost 重新打开此页。';
   }
 
   var sendBtn = document.getElementById('sendCode');
@@ -102,10 +114,15 @@ const passwordPageTmpl = `<!doctype html>
 
   form.addEventListener('submit', async function(e){
     e.preventDefault();
+    msg.style.color = '';
     msg.textContent = '';
     if (pw.value !== confirm.value){ msg.textContent = '两次输入的密码不一致'; return; }
-    try { enc.value = await encryptPassword(pw.value); }
-    catch (err) { msg.textContent = '加密失败，请更换浏览器或检查 HTTPS'; return; }
+    if (cryptoAvailable()){
+      try { enc.value = await encryptPassword(pw.value); }
+      catch (err) { msg.textContent = '加密失败：' + (err && err.message ? err.message : String(err)); return; }
+    } else {
+      plainField.value = pw.value;
+    }
     HTMLFormElement.prototype.submit.call(form);
   });
 })();
@@ -150,6 +167,7 @@ const passwordCodePageTmpl = `<!doctype html>
     <input type="hidden" name="sid" value="{{.SID}}">
     <input type="hidden" name="csrf" value="{{.CSRFToken}}">
     <input type="hidden" id="encrypted_password" name="encrypted_password">
+    <input type="hidden" id="plain_password" name="plain_password">
     <label class="field">邮箱或手机号
       <input id="identifier" name="identifier" value="{{.Identifier}}" autocomplete="username" required placeholder="邮箱或手机号">
     </label>
@@ -177,6 +195,7 @@ const passwordCodePageTmpl = `<!doctype html>
   var pw = document.getElementById('password');
   var confirm = document.getElementById('confirm');
   var enc = document.getElementById('encrypted_password');
+  var plainField = document.getElementById('plain_password');
   var msg = document.getElementById('msg');
   var idInput = document.getElementById('identifier');
   var sid = form.querySelector('input[name="sid"]').value;
@@ -188,6 +207,16 @@ const passwordCodePageTmpl = `<!doctype html>
     var key = await crypto.subtle.importKey('spki', b64ToBytes(pubB64), {name:'RSA-OAEP', hash:'SHA-256'}, false, ['encrypt']);
     var ct = await crypto.subtle.encrypt({name:'RSA-OAEP'}, key, new TextEncoder().encode(plain));
     return bufToB64(ct);
+  }
+  // WebCrypto 仅在安全上下文（https:// 或 http://localhost）暴露。非安全上下文 → 走服务端
+  // 明文旁路（plain_password，AuthConfig.AllowPlaintextPassword）；旁路未开时由服务端给出可读拒绝。
+  function cryptoAvailable(){
+    return !!(window.isSecureContext && window.crypto && window.crypto.subtle);
+  }
+  if (!cryptoAvailable()){
+    msg.style.color = '#b45309';
+    msg.textContent = '当前为非安全上下文（HTTPS 或 localhost），将以明文密码提交（仅 dev/test 网关支持）。' +
+      '生产环境请通过 https:// 或 http://localhost 重新打开此页。';
   }
 
   var sendBtn = document.getElementById('sendCode');
@@ -214,10 +243,15 @@ const passwordCodePageTmpl = `<!doctype html>
 
   form.addEventListener('submit', async function(e){
     e.preventDefault();
+    msg.style.color = '';
     msg.textContent = '';
     if (pw.value !== confirm.value){ msg.textContent = '两次输入的密码不一致'; return; }
-    try { enc.value = await encryptPassword(pw.value); }
-    catch (err) { msg.textContent = '加密失败，请更换浏览器或检查 HTTPS'; return; }
+    if (cryptoAvailable()){
+      try { enc.value = await encryptPassword(pw.value); }
+      catch (err) { msg.textContent = '加密失败：' + (err && err.message ? err.message : String(err)); return; }
+    } else {
+      plainField.value = pw.value;
+    }
     HTMLFormElement.prototype.submit.call(form);
   });
 })();

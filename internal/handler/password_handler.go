@@ -20,19 +20,22 @@ import (
 //
 // 关键约束：托管页跑在系统浏览器、无桌面 Bearer，故页面作用域端点不走 JWTAuth，靠 t + 一次性 CSRF 授权。
 type PasswordHandler struct {
-	pwService   *service.PasswordService
-	otpSvc      *service.OTPService
-	links       *auth.PasswordLinkStore
-	csrf        *auth.CSRFStore
-	rsa         *auth.RSADecryptor
-	gatewayBase string
-	formTmpl    *template.Template
-	codeTmpl    *template.Template
-	resultTmpl  *template.Template
+	pwService      *service.PasswordService
+	otpSvc         *service.OTPService
+	links          *auth.PasswordLinkStore
+	csrf           *auth.CSRFStore
+	rsa            *auth.RSADecryptor
+	gatewayBase    string
+	allowPlaintext bool // dev/test 旁路：是否允许 plain_password 字段（cfg.Auth.AllowPlaintextPassword）
+	formTmpl       *template.Template
+	codeTmpl       *template.Template
+	resultTmpl     *template.Template
 }
 
 // NewPasswordHandler 构造设密码 handler。gatewayBase 为网关外部基址（拼托管页 URL）；
 // otpSvc 供改密路径页面作用域发码（POST /oauth/password/send-code，purpose=pwreset）。
+// allowPlaintext 是 dev/test 旁路（cfg.Auth.AllowPlaintextPassword）：true 时接受 plain_password
+// 字段，handler 用 RSA 公钥就地加密后喂给 service；prod/staging 由 config.validate 顶为 false。
 func NewPasswordHandler(
 	pwService *service.PasswordService,
 	otpSvc *service.OTPService,
@@ -40,18 +43,25 @@ func NewPasswordHandler(
 	csrf *auth.CSRFStore,
 	rsa *auth.RSADecryptor,
 	gatewayBase string,
+	allowPlaintext bool,
 ) *PasswordHandler {
 	return &PasswordHandler{
-		pwService:   pwService,
-		otpSvc:      otpSvc,
-		links:       links,
-		csrf:        csrf,
-		rsa:         rsa,
-		gatewayBase: gatewayBase,
-		formTmpl:    template.Must(template.New("pwForm").Parse(passwordPageTmpl)),
-		codeTmpl:    template.Must(template.New("pwCodeForm").Parse(passwordCodePageTmpl)),
-		resultTmpl:  template.Must(template.New("pwResult").Parse(passwordResultTmpl)),
+		pwService:      pwService,
+		otpSvc:         otpSvc,
+		links:          links,
+		csrf:           csrf,
+		rsa:            rsa,
+		gatewayBase:    gatewayBase,
+		allowPlaintext: allowPlaintext,
+		formTmpl:       template.Must(template.New("pwForm").Parse(passwordPageTmpl)),
+		codeTmpl:       template.Must(template.New("pwCodeForm").Parse(passwordCodePageTmpl)),
+		resultTmpl:     template.Must(template.New("pwResult").Parse(passwordResultTmpl)),
 	}
+}
+
+// resolveEncrypted 是 PasswordHandler 上的薄包装，转发到包级 resolveSubmittedPassword。
+func (h *PasswordHandler) resolveEncrypted(encrypted, plain string) (string, string) {
+	return resolveSubmittedPassword(h.rsa, h.allowPlaintext, encrypted, plain)
 }
 
 type passwordLinkResponse struct {
@@ -172,7 +182,7 @@ func (h *PasswordHandler) SubmitPassword(c *gin.Context) {
 		return
 	}
 	csrfToken := c.PostForm("csrf")
-	encrypted := c.PostForm("encrypted_password")
+	encrypted, errMsg := h.resolveEncrypted(c.PostForm("encrypted_password"), c.PostForm("plain_password"))
 	code := c.PostForm("code")
 
 	// 先 Peek（不消费）确认链接有效，定位账号。成功写入后才 Take 消费（单次有效）。
@@ -189,6 +199,13 @@ func (h *PasswordHandler) SubmitPassword(c *gin.Context) {
 	// 一次性 CSRF：消费后无论成败都需重新签发（renderForm 会签发新的）。
 	if ok, err := h.csrf.Consume(c.Request.Context(), token, csrfToken); err != nil || !ok {
 		h.renderForm(c, token, link.UserUUID, "会话已失效，请重试。")
+		return
+	}
+
+	// 明文旁路被拒（prod/staging 未开 AllowPlaintextPassword）：在 CSRF 已消费后回渲，
+	// renderForm 会签发新的 CSRF，避免用户卡死。
+	if errMsg != "" {
+		h.renderForm(c, token, link.UserUUID, errMsg)
 		return
 	}
 
@@ -313,11 +330,17 @@ func (h *PasswordHandler) submitForgotPassword(c *gin.Context) {
 	csrfToken := c.PostForm("csrf")
 	identifier := c.PostForm("identifier")
 	code := c.PostForm("code")
-	encrypted := c.PostForm("encrypted_password")
+	encrypted, errMsg := h.resolveEncrypted(c.PostForm("encrypted_password"), c.PostForm("plain_password"))
 
 	// 一次性 CSRF：提交即消费（成败都会重渲新页/新 csrf）。
 	if ok, err := h.csrf.Consume(c.Request.Context(), sid, csrfToken); err != nil || !ok {
 		h.renderCodeForm(c, identifier, "会话已失效，请重试。")
+		return
+	}
+
+	// 明文旁路被拒（prod/staging 未开 AllowPlaintextPassword）：回渲带提示。
+	if errMsg != "" {
+		h.renderCodeForm(c, identifier, errMsg)
 		return
 	}
 

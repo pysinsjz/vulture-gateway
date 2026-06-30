@@ -71,3 +71,15 @@ func (d *RSADecryptor) Decrypt(b64Ciphertext string) (string, error) {
 	}
 	return string(plain), nil
 }
+
+// EncryptPlaintext 用网关持有的公钥做 RSA-OAEP(SHA-256) 加密，返回 base64 密文。
+// 仅供 dev/test 明文密码旁路使用（AuthConfig.AllowPlaintextPassword）：浏览器非安全上下文
+// 拿不到 WebCrypto 时，handler 用此方法把 plain_password 重新加密一遍再喂给 service，
+// 避免修改 service/auth 域既有 RSA 解密路径。prod/staging 禁用此旁路（启动校验顶住）。
+func (d *RSADecryptor) EncryptPlaintext(plain string) (string, error) {
+	ct, err := rsa.EncryptOAEP(sha256.New(), rand.Reader, &d.priv.PublicKey, []byte(plain), nil)
+	if err != nil {
+		return "", fmt.Errorf("RSA-OAEP 加密失败: %w", err)
+	}
+	return base64.StdEncoding.EncodeToString(ct), nil
+}

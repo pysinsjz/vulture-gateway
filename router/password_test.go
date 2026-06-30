@@ -26,7 +26,9 @@ import (
 
 // newPasswordEngine 装配一套注入内存身份/用户仓的引擎，并以固定 RSA 私钥构造解密器，
 // 使测试能用配对公钥加密密码、走完整 router 级 HTTP 缝。返回引擎、miniredis（供 TTL 推进）与私钥。
-func newPasswordEngine(t *testing.T, idRepo *memIdentityRepo) (*gin.Engine, *miniredis.Miniredis, *rsa.PrivateKey) {
+// newPasswordEngine 装配一套注入内存身份/用户仓的引擎。可选 cfgOpts 在 wire 前微调 cfg
+// （如开启 AllowPlaintextPassword），旧调用零改动。
+func newPasswordEngine(t *testing.T, idRepo *memIdentityRepo, cfgOpts ...func(*config.Configuration)) (*gin.Engine, *miniredis.Miniredis, *rsa.PrivateKey) {
 	t.Helper()
 	mr, err := miniredis.Run()
 	if err != nil {
@@ -72,6 +74,9 @@ func newPasswordEngine(t *testing.T, idRepo *memIdentityRepo) (*gin.Engine, *min
 		ClawHub:  config.ClawHubConfig{BaseURL: "http://127.0.0.1:1", Timeout: 5 * time.Second},
 		LLM:      config.LLMConfig{BaseURL: "http://127.0.0.1:1", MasterKey: "test-master", Timeout: 5 * time.Second},
 		Scaffold: config.ScaffoldConfig{Enabled: true},
+	}
+	for _, opt := range cfgOpts {
+		opt(cfg)
 	}
 
 	app, err := wire.WireApp(cfg, wire.WithIdentityRepository(idRepo), wire.WithUserRepository(memUserRepo{}), wire.WithTransactor(passthroughTx{}))
@@ -576,5 +581,86 @@ func TestResetPassword_RateLimitLock(t *testing.T) {
 	}
 	if idRepo.secretOf(model.IdentityTypeEmail, "l@x.com") != oldHash {
 		t.Error("锁定全程 secret 不应改动")
+	}
+}
+
+// ---- 明文密码旁路（AuthConfig.AllowPlaintextPassword，dev/test）----
+//
+// 浏览器在非安全上下文（非 https://、非 localhost）拿不到 WebCrypto，无法 RSA 加密。
+// 旁路允许前端发 plain_password 字段，handler 用网关 RSA 公钥就地加密喂给 service。
+// 旁路关闭（prod/staging 由 config.validate 顶住）时同样请求被服务端拒绝并给出可读提示。
+
+func TestSetPassword_PlaintextBypass_Allowed_Succeeds(t *testing.T) {
+	idRepo := newMemIdentityRepo()
+	idRepo.seed(&model.Identity{UUID: "idn_e", UserUUID: "usr_plain", Type: model.IdentityTypeEmail, Identifier: "plain@x.com"})
+	e, _, _ := newPasswordEngine(t, idRepo, func(c *config.Configuration) {
+		c.Auth.AllowPlaintextPassword = true
+	})
+
+	tok := mintLink(t, e, issueViaScaffold(t, e, "usr_plain", "dev_plain"))
+	pageRec := do(t, e, http.MethodGet, "/oauth/password?t="+url.QueryEscape(tok), "", nil)
+	csrf := extractCSRF(t, pageRec.Body.String())
+
+	const newPassword = "plaintext123"
+	rec := doForm(t, e, http.MethodPost, "/oauth/password", "", url.Values{
+		"t":              {tok},
+		"csrf":           {csrf},
+		"plain_password": {newPassword},
+	})
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "设置成功") {
+		t.Fatalf("旁路开启 + plain_password 期望设置成功, 实际 %d: %s", rec.Code, rec.Body.String())
+	}
+	if idRepo.secretOf(model.IdentityTypeEmail, "plain@x.com") == "" {
+		t.Error("明文旁路应已写入 secret")
+	}
+}
+
+func TestSetPassword_PlaintextBypass_Disabled_Rejects(t *testing.T) {
+	idRepo := newMemIdentityRepo()
+	idRepo.seed(&model.Identity{UUID: "idn_e", UserUUID: "usr_reject", Type: model.IdentityTypeEmail, Identifier: "reject@x.com"})
+	// 默认 AllowPlaintextPassword=false（模拟 prod/staging）。
+	e, _, _ := newPasswordEngine(t, idRepo)
+
+	tok := mintLink(t, e, issueViaScaffold(t, e, "usr_reject", "dev_reject"))
+	pageRec := do(t, e, http.MethodGet, "/oauth/password?t="+url.QueryEscape(tok), "", nil)
+	csrf := extractCSRF(t, pageRec.Body.String())
+
+	rec := doForm(t, e, http.MethodPost, "/oauth/password", "", url.Values{
+		"t":              {tok},
+		"csrf":           {csrf},
+		"plain_password": {"plaintext123"},
+	})
+	body := rec.Body.String()
+	if strings.Contains(body, "设置成功") {
+		t.Fatalf("旁路关闭时 plain_password 不应成功: %s", body)
+	}
+	if !strings.Contains(body, "明文") || !strings.Contains(body, "https://") {
+		t.Errorf("应给出可读旁路拒绝提示, 实际: %s", body)
+	}
+	if idRepo.secretOf(model.IdentityTypeEmail, "reject@x.com") != "" {
+		t.Error("旁路被拒不应写入任何 secret")
+	}
+}
+
+func TestSetPassword_EncryptedTakesPrecedenceOverPlaintext(t *testing.T) {
+	idRepo := newMemIdentityRepo()
+	idRepo.seed(&model.Identity{UUID: "idn_e", UserUUID: "usr_both", Type: model.IdentityTypeEmail, Identifier: "both@x.com"})
+	// 即便旁路开启，encrypted_password 仍优先（前端在 secure context 走加密路径不受影响）。
+	e, _, priv := newPasswordEngine(t, idRepo, func(c *config.Configuration) {
+		c.Auth.AllowPlaintextPassword = true
+	})
+
+	tok := mintLink(t, e, issueViaScaffold(t, e, "usr_both", "dev_both"))
+	pageRec := do(t, e, http.MethodGet, "/oauth/password?t="+url.QueryEscape(tok), "", nil)
+	csrf := extractCSRF(t, pageRec.Body.String())
+
+	rec := doForm(t, e, http.MethodPost, "/oauth/password", "", url.Values{
+		"t":                  {tok},
+		"csrf":               {csrf},
+		"encrypted_password": {encryptRSA(t, &priv.PublicKey, "encryptedwin1")},
+		"plain_password":     {"shouldBeIgnored1"},
+	})
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "设置成功") {
+		t.Fatalf("encrypted_password 应优先并成功, 实际 %d: %s", rec.Code, rec.Body.String())
 	}
 }

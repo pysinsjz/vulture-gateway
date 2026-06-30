@@ -32,18 +32,22 @@ const eagerProvisionTimeout = 15 * time.Second
 // LoginHandler 承接网关自建登录页（ADR-0013）：渲染登录页、处理凭据提交与验证码下发，
 // 成功后续接既有 GW_CODE 签发与回跳桌面端（下游零改动）。
 type LoginHandler struct {
-	registry *signin.Registry
-	otpSvc   *service.OTPService
-	authz    *auth.AuthzStore
-	gwcodes  *auth.GWCodeStore
-	users    dao.UserRepository
-	vkeys    VirtualKeyProvisioner
-	rsa      *auth.RSADecryptor
-	csrf     *auth.CSRFStore
-	tmpl     *template.Template
+	registry       *signin.Registry
+	otpSvc         *service.OTPService
+	authz          *auth.AuthzStore
+	gwcodes        *auth.GWCodeStore
+	users          dao.UserRepository
+	vkeys          VirtualKeyProvisioner
+	rsa            *auth.RSADecryptor
+	csrf           *auth.CSRFStore
+	allowPlaintext bool // dev/test 旁路：是否接受 plain_credential（cfg.Auth.AllowPlaintextPassword）
+	tmpl           *template.Template
 }
 
 // NewLoginHandler 构造登录页 handler。vkeys 为 ADR-0014 eager 签发入口（登录即注册成功后触发，失败不阻断）。
+// allowPlaintext 是 dev/test 旁路（cfg.Auth.AllowPlaintextPassword）：true 时接受 plain_credential
+// 字段（仅 password 方式），handler 用 RSA 公钥就地加密后喂给 signin password method；
+// prod/staging 由 config.validate 顶为 false。验证码方式不受旁路影响（验证码本就明文提交）。
 func NewLoginHandler(
 	registry *signin.Registry,
 	otpSvc *service.OTPService,
@@ -53,17 +57,19 @@ func NewLoginHandler(
 	vkeys VirtualKeyProvisioner,
 	rsa *auth.RSADecryptor,
 	csrf *auth.CSRFStore,
+	allowPlaintext bool,
 ) *LoginHandler {
 	return &LoginHandler{
-		registry: registry,
-		otpSvc:   otpSvc,
-		authz:    authz,
-		gwcodes:  gwcodes,
-		users:    users,
-		vkeys:    vkeys,
-		rsa:      rsa,
-		csrf:     csrf,
-		tmpl:     template.Must(template.New("login").Parse(loginPageTmpl)),
+		registry:       registry,
+		otpSvc:         otpSvc,
+		authz:          authz,
+		gwcodes:        gwcodes,
+		users:          users,
+		vkeys:          vkeys,
+		rsa:            rsa,
+		csrf:           csrf,
+		allowPlaintext: allowPlaintext,
+		tmpl:           template.Must(template.New("login").Parse(loginPageTmpl)),
 	}
 }
 
@@ -154,6 +160,16 @@ func (h *LoginHandler) Login(c *gin.Context) {
 	if ok, err := h.csrf.Consume(c.Request.Context(), linkedState, csrfToken); err != nil || !ok {
 		h.render(c, linkedState, "会话已失效，请重试。")
 		return
+	}
+
+	// 仅 password 方式应用明文密码旁路（验证码方式 credential 即明文验证码，不需要也不应该被加密）。
+	if method == "password" {
+		resolved, errMsg := resolveSubmittedPassword(h.rsa, h.allowPlaintext, credential, c.PostForm("plain_credential"))
+		if errMsg != "" {
+			h.render(c, linkedState, errMsg)
+			return
+		}
+		credential = resolved
 	}
 
 	m, ok := h.registry.Get(method)

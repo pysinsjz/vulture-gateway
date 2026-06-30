@@ -97,7 +97,14 @@ type loginFixture struct {
 	pub        *rsa.PublicKey
 }
 
+// newLoginFixture 装配默认 allowPlaintext=false 的登录 fixture（兼容既有调用）。
+// 需要旁路开启的测试用 newLoginFixtureWithBypass。
 func newLoginFixture(t *testing.T) *loginFixture {
+	return newLoginFixtureAllowingPlaintext(t, false)
+}
+
+// newLoginFixtureAllowingPlaintext 显式控制 AllowPlaintextPassword，用于旁路回归测试。
+func newLoginFixtureAllowingPlaintext(t *testing.T, allowPlaintext bool) *loginFixture {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	mr, err := miniredis.Run()
@@ -131,7 +138,7 @@ func newLoginFixture(t *testing.T) *loginFixture {
 		model.ProviderCategoryEmail: notify.NewStubSender("email"),
 	})
 
-	h := handler.NewLoginHandler(registry, otpSvc, authzStore, gwStore, users, noopVKeyProvisioner{}, rsaDec, csrfStore)
+	h := handler.NewLoginHandler(registry, otpSvc, authzStore, gwStore, users, noopVKeyProvisioner{}, rsaDec, csrfStore, allowPlaintext)
 
 	r := gin.New()
 	r.GET("/oauth/login", h.LoginPage)
@@ -412,5 +419,96 @@ func TestSendCode_UnsupportedMethod(t *testing.T) {
 	})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("password 不支持发码应 400, 实际 %d", rec.Code)
+	}
+}
+
+// ---- 明文密码旁路（AuthConfig.AllowPlaintextPassword，dev/test）----
+//
+// 浏览器在非安全上下文（非 https://、非 localhost）拿不到 WebCrypto，无法 RSA 加密。
+// 旁路允许密码方式发 plain_credential 字段，handler 用 RSA 公钥就地加密喂给 signin password method。
+// 验证码方式不受影响（验证码本就明文提交，不应被加密）。
+
+func TestLogin_Password_PlaintextBypass_Allowed_Succeeds(t *testing.T) {
+	f := newLoginFixtureAllowingPlaintext(t, true)
+	const redirectURI = "http://127.0.0.1:5173/callback"
+	f.seedAuthz(t, "lk1", redirectURI, "orig-plain")
+	f.seedPasswordIdentity(t, "u@x.com", "usr_plain", "correct-pass")
+
+	token, _ := f.csrf.Issue(context.Background(), "lk1")
+	rec := f.do(t, http.MethodPost, "/oauth/login", url.Values{
+		"lk":              {"lk1"},
+		"csrf":            {token},
+		"method":          {"password"},
+		"identifier":      {"u@x.com"},
+		"plain_credential": {"correct-pass"}, // credential 留空 → 走旁路
+	})
+	if rec.Code != http.StatusFound {
+		t.Fatalf("旁路开启 + plain_credential 应登录成功 302, 实际 %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestLogin_Password_PlaintextBypass_Disabled_Rejects(t *testing.T) {
+	f := newLoginFixtureAllowingPlaintext(t, false) // 模拟 prod/staging
+	f.seedAuthz(t, "lk1", "http://127.0.0.1:5173/callback", "orig")
+	f.seedPasswordIdentity(t, "u@x.com", "usr_reject", "correct-pass")
+
+	token, _ := f.csrf.Issue(context.Background(), "lk1")
+	rec := f.do(t, http.MethodPost, "/oauth/login", url.Values{
+		"lk":              {"lk1"},
+		"csrf":            {token},
+		"method":          {"password"},
+		"identifier":      {"u@x.com"},
+		"plain_credential": {"correct-pass"},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("旁路关闭时 plain_credential 应回渲 200, 实际 %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "明文") || !strings.Contains(body, "https://") {
+		t.Errorf("应给出可读旁路拒绝提示, 实际: %s", body)
+	}
+}
+
+func TestLogin_Password_EncryptedTakesPrecedenceOverPlaintext(t *testing.T) {
+	f := newLoginFixtureAllowingPlaintext(t, true)
+	f.seedAuthz(t, "lk1", "http://127.0.0.1:5173/callback", "orig")
+	f.seedPasswordIdentity(t, "u@x.com", "usr_both", "correct-pass")
+
+	token, _ := f.csrf.Issue(context.Background(), "lk1")
+	// encrypted 用正确密码 + plain 用错密码 → 走 encrypted 应当成功（验证 encrypted 优先）。
+	rec := f.do(t, http.MethodPost, "/oauth/login", url.Values{
+		"lk":              {"lk1"},
+		"csrf":            {token},
+		"method":          {"password"},
+		"identifier":      {"u@x.com"},
+		"credential":      {f.encryptPassword(t, "correct-pass")},
+		"plain_credential": {"would-fail-if-used"},
+	})
+	if rec.Code != http.StatusFound {
+		t.Fatalf("encrypted_password 应优先并成功 302, 实际 %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestLogin_CodeMethod_IgnoresPlaintextBypass(t *testing.T) {
+	// 验证码方式：credential 即明文验证码，旁路逻辑不应介入。这里覆盖 method != "password"
+	// 的分支：plain_credential 字段被忽略，credential 原样进 signin。
+	f := newLoginFixtureAllowingPlaintext(t, true)
+	f.seedAuthz(t, "lk1", "http://127.0.0.1:5173/callback", "orig")
+	f.identities.byKey[model.IdentityTypeEmail+"|"+"c@x.com"] = &model.Identity{
+		UUID: "idn_c", UserUUID: "usr_c", Type: model.IdentityTypeEmail, Identifier: "c@x.com",
+	}
+	// 直接写一条 OTP（绕过 send-code 流程）。
+	_, _ = f.otp.Issue(context.Background(), "c@x.com", auth.PurposeLogin)
+	rec := f.do(t, http.MethodPost, "/oauth/login", url.Values{
+		"lk":              {"lk1"},
+		"csrf":            {func() string { tk, _ := f.csrf.Issue(context.Background(), "lk1"); return tk }()},
+		"method":          {"email_code"},
+		"identifier":      {"c@x.com"},
+		"credential":      {"000000"}, // 验证码错（OTP issue 后码未知），仅验证旁路不介入；不期望登录成功。
+		"plain_credential": {"ignored-for-code-method"},
+	})
+	// 不应是 5xx；不应被旁路逻辑改写后导致解密失败崩溃。验证码方式逻辑路径不变。
+	if rec.Code >= 500 {
+		t.Fatalf("验证码方式不应被旁路影响导致 5xx, 实际 %d: %s", rec.Code, rec.Body.String())
 	}
 }
