@@ -133,11 +133,23 @@ func (s *PluginService) ListPlugins(ctx context.Context, params PluginListParams
 	return &Page[PluginListItem]{Items: items, NextCursor: page.NextCursor}, nil
 }
 
-// PluginCategories 派生 plugin 分类端点（§3.1b）：翻全量 /packages（游标翻页），按
-// X-Platform/X-App-Version 兼容过滤后按 pluginCategory 聚合计数。不按 family/channel 预过滤
-// （分类端点是全量分组口径）。网关派生口径（不改 ClawHub fork），已知偏差见 categoryAggregator。
+// PluginCategories 输出 plugin 分类端点（§3.1b）：拉 ClawHub 运营字典 + 翻全量 /packages
+// 按 X-Platform/X-App-Version 兼容过滤 + 按制品的 pluginCategorySlug 聚合 count。
+//
+// 输出语义（见 buildCategoriesResponse）：
+//   - archived 字典项不出（ClawHub 公开 query 已过滤，service 防御性再过滤一层）
+//   - 按字典 order 升序排
+//   - `other` 强制末位
+//   - 0 计数也保留（"招商中"信号）
+//   - 制品 categorySlug 缺失 / 不在字典里 → 计入 `other` 桶
 func (s *PluginService) PluginCategories(ctx context.Context, cc CompatContext) (*CategoriesResponse, error) {
-	agg := newCategoryAggregator()
+	dict, err := s.hub.ListPluginCategoriesDictionary(ctx)
+	if err != nil {
+		return nil, err
+	}
+	active := activeSlugSet(dict)
+
+	counts := map[string]int{}
 	cursor := ""
 	for i := 0; i < categoriesMaxPages; i++ {
 		page, err := s.hub.ListPackages(ctx, clawhub.ListParams{Limit: categoriesPageSize, Cursor: cursor})
@@ -148,15 +160,15 @@ func (s *PluginService) PluginCategories(ctx context.Context, cc CompatContext) 
 			if !compatiblePackage(p, cc) {
 				continue
 			}
-			agg.add(translateCategory(p.PluginCategory))
+			counts[resolveCategorySlug(p.PluginCategorySlug, active)]++
 		}
 		if page.NextCursor == nil || *page.NextCursor == "" {
 			break
 		}
 		cursor = *page.NextCursor
 	}
-	res := agg.result()
-	return &res, nil
+
+	return buildCategoriesResponse(dict, counts), nil
 }
 
 // ListPluginVersions 转发到 ClawHub /packages/{name}/versions 并翻译为 plugin 版本历史分页。

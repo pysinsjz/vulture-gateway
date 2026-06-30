@@ -1,6 +1,10 @@
 package service
 
-import "github.com/pysinsjz/vulture-gateway/internal/clawhub"
+import (
+	"sort"
+
+	"github.com/pysinsjz/vulture-gateway/internal/clawhub"
+)
 
 // 本文件汇集 skill / plugin 两族共享的对外契约类型与翻译 helper。
 // 对外类型与 ClawHub 内部类型刻意分离：翻译层（#20）负责把 ClawHub 契约整形为桌面端契约，
@@ -43,48 +47,72 @@ const (
 	categoriesMaxPages = 1000
 )
 
-// categoryAggregator 累计「分类 → 可见制品数」，保持分类的首次出现顺序，
-// category==nil 的可见制品归入末位「其他」桶。
+// buildCategoriesResponse 把 ClawHub 字典 + 制品 slug→count 计数表组装成对外响应。
 //
-// 派生口径的已知偏差（§3.1b「网关派生」分支）：
-//   - 顺序为首现序（列表默认排序决定），非运营定义序；
-//   - 0 可见制品的分类不会出现（派生只见列表里实际出现过的分类）。
+// 规则（§3.1b 目标态，issue #44）：
+//   1. 过滤 archived 项（ClawHub 公开 query 已源头过滤；此处是防御 + 单测可注入）。
+//   2. 按字典 order 升序排（不信任上游一定排序；ClawHub 改了不破坏 gateway 契约）。
+//   3. `other` 桶（uncategorizedID）强制末位（即便运营把 order 设到中间）。
+//   4. 0 计数也输出（"招商中"信号，桌面端渲染占位）。
+//   5. 制品 slug 命中字典 → 计入；不命中（字典里没有、archived 后字典消失、或 slug 为空）
+//      → 累加到 `other` 桶兜底。
 //
-// 目标态由 ClawHub fork 原生分类端点取代（见 docs/flows/clawhub-gateway-contract.md）。
-type categoryAggregator struct {
-	order      []string          // 首现顺序的分类 id
-	labels     map[string]string // id → label（同 id 以首现 label 为准）
-	counts     map[string]int    // id → 可见制品数
-	uncatCount int               // 未分类（category==nil）可见制品数
+// counts 必含 uncategorizedID 桶（由调用方负责把未命中累加到该 key）。
+func buildCategoriesResponse(dict []clawhub.CategoryDict, counts map[string]int) *CategoriesResponse {
+	active := make([]clawhub.CategoryDict, 0, len(dict))
+	for _, d := range dict {
+		if d.Archived {
+			continue
+		}
+		active = append(active, d)
+	}
+
+	sort.SliceStable(active, func(i, j int) bool { return active[i].Order < active[j].Order })
+
+	out := make([]CategoryCount, 0, len(active)+1)
+	var other *CategoryCount
+	for _, d := range active {
+		c := CategoryCount{ID: d.Slug, Label: d.Label, Count: counts[d.Slug]}
+		if d.Slug == uncategorizedID {
+			cc := c
+			other = &cc
+			continue
+		}
+		out = append(out, c)
+	}
+	if other == nil {
+		other = &CategoryCount{ID: uncategorizedID, Label: uncategorizedLabel, Count: counts[uncategorizedID]}
+	}
+	out = append(out, *other)
+
+	return &CategoriesResponse{Categories: out}
 }
 
-func newCategoryAggregator() *categoryAggregator {
-	return &categoryAggregator{labels: map[string]string{}, counts: map[string]int{}}
+// resolveCategorySlug 把制品的 categorySlug 映射到字典里的 slug。空串 / 字典里没有的
+// slug（如 archived 后从字典里消失的存量制品）→ `other`。
+//
+// active 由调用方按 buildCategoriesResponse 同款规则准备（archived 已过滤，未排序也行）。
+func resolveCategorySlug(slug string, active map[string]struct{}) string {
+	if slug == "" {
+		return uncategorizedID
+	}
+	if _, ok := active[slug]; !ok {
+		return uncategorizedID
+	}
+	return slug
 }
 
-// add 累计一个可见制品的分类。调用方负责仅传入「通过兼容过滤」的制品。
-func (a *categoryAggregator) add(cat *Category) {
-	if cat == nil {
-		a.uncatCount++
-		return
+// activeSlugSet 把字典转成 slug 集合（用于 resolveCategorySlug 的 O(1) 查表）。
+// archived 项跳过——它们已不在字典语义内，相关存量制品应落 `other` 桶。
+func activeSlugSet(dict []clawhub.CategoryDict) map[string]struct{} {
+	set := make(map[string]struct{}, len(dict))
+	for _, d := range dict {
+		if d.Archived {
+			continue
+		}
+		set[d.Slug] = struct{}{}
 	}
-	if _, seen := a.counts[cat.ID]; !seen {
-		a.order = append(a.order, cat.ID)
-		a.labels[cat.ID] = cat.Label
-	}
-	a.counts[cat.ID]++
-}
-
-// result 按首现序输出分类计数；末位追加「其他」桶（仅当存在未分类可见制品）。
-func (a *categoryAggregator) result() CategoriesResponse {
-	cats := make([]CategoryCount, 0, len(a.order)+1)
-	for _, id := range a.order {
-		cats = append(cats, CategoryCount{ID: id, Label: a.labels[id], Count: a.counts[id]})
-	}
-	if a.uncatCount > 0 {
-		cats = append(cats, CategoryCount{ID: uncategorizedID, Label: uncategorizedLabel, Count: a.uncatCount})
-	}
-	return CategoriesResponse{Categories: cats}
+	return set
 }
 
 // PageParams 是纯游标分页参数（版本历史等列表用）。

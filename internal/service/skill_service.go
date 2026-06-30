@@ -140,10 +140,18 @@ func (s *SkillService) ListSkills(ctx context.Context, params SkillListParams, c
 	return &Page[SkillListItem]{Items: items, NextCursor: page.NextCursor}, nil
 }
 
-// SkillCategories 派生 skill 分类端点（§3.1b）：翻全量 /skills（游标翻页），按 X-Platform
-// 兼容过滤后按 category 聚合计数。网关派生口径（不改 ClawHub fork），已知偏差见 categoryAggregator。
+// SkillCategories 输出 skill 分类端点（§3.1b）：拉 ClawHub 运营字典 + 翻全量 /skills
+// 按 X-Platform 兼容过滤 + 按 skillCategorySlug 聚合 count。语义同 PluginCategories
+// （见 buildCategoriesResponse）：archived 不出 / order 升序 / `other` 末位 / 0 计数保留 /
+// 缺失或不在字典里的 slug → 落 `other` 桶。
 func (s *SkillService) SkillCategories(ctx context.Context, cc CompatContext) (*CategoriesResponse, error) {
-	agg := newCategoryAggregator()
+	dict, err := s.hub.ListSkillCategoriesDictionary(ctx)
+	if err != nil {
+		return nil, err
+	}
+	active := activeSlugSet(dict)
+
+	counts := map[string]int{}
 	cursor := ""
 	for i := 0; i < categoriesMaxPages; i++ {
 		page, err := s.hub.ListSkills(ctx, clawhub.SkillListParams{Limit: categoriesPageSize, Cursor: cursor})
@@ -154,15 +162,15 @@ func (s *SkillService) SkillCategories(ctx context.Context, cc CompatContext) (*
 			if !compatibleSkill(sk.Metadata, cc) {
 				continue
 			}
-			agg.add(translateCategory(sk.Category))
+			counts[resolveCategorySlug(sk.SkillCategorySlug, active)]++
 		}
 		if page.NextCursor == nil || *page.NextCursor == "" {
 			break
 		}
 		cursor = *page.NextCursor
 	}
-	res := agg.result()
-	return &res, nil
+
+	return buildCategoriesResponse(dict, counts), nil
 }
 
 // GetSkill 转发到 ClawHub /skills/{slug} 并翻译为 SkillDetail。
