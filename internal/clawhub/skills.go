@@ -53,13 +53,14 @@ type SkillListItem struct {
 
 // SkillInfo 是 skill 详情的元信息块。
 type SkillInfo struct {
-	Slug        string            `json:"slug"`
-	DisplayName string            `json:"displayName"`
-	Summary     string            `json:"summary,omitempty"`
-	Category    *Category         `json:"category"`
-	Tags        map[string]string `json:"tags"`
-	CreatedAt   int64             `json:"createdAt"`
-	UpdatedAt   int64             `json:"updatedAt"`
+	Slug              string            `json:"slug"`
+	DisplayName       string            `json:"displayName"`
+	Summary           string            `json:"summary,omitempty"`
+	Category          *Category         `json:"category"`
+	SkillCategorySlug string            `json:"skillCategorySlug,omitempty"`
+	Tags              map[string]string `json:"tags"`
+	CreatedAt         int64             `json:"createdAt"`
+	UpdatedAt         int64             `json:"updatedAt"`
 }
 
 // SkillDetail 是 ClawHub GET /skills/{slug} 的原始详情。
