@@ -68,10 +68,11 @@ type VersionFile struct {
 
 // PackageDetail 是 ClawHub GET /packages/{name} 的原始详情。
 type PackageDetail struct {
-	Package        PackageInfo            `json:"package"`
-	LatestVersion  *PackageVersionSummary `json:"latestVersion"`
-	Compatibility  *Compatibility         `json:"compatibility,omitempty"`
-	PluginCategory *Category              `json:"pluginCategory"`
+	Package            PackageInfo            `json:"package"`
+	LatestVersion      *PackageVersionSummary `json:"latestVersion"`
+	Compatibility      *Compatibility         `json:"compatibility,omitempty"`
+	PluginCategory     *Category              `json:"pluginCategory"`
+	PluginCategorySlug string                 `json:"pluginCategorySlug,omitempty"`
 }
 
 // PackageInfo 是 plugin 的元信息块。

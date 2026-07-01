@@ -9,28 +9,30 @@ import (
 // PluginListItem 是 plugin 列表项的对外契约（§3.1）。不含 hostTargets/minAppVersion——
 // 那些仅用于网关侧兼容过滤，翻译时剥离。
 type PluginListItem struct {
-	Name             string    `json:"name"`
-	DisplayName      string    `json:"displayName"`
-	Summary          string    `json:"summary,omitempty"`
-	Category         *Category `json:"category"`
-	Family           string    `json:"family"`
-	Channel          string    `json:"channel"`
-	IsOfficial       bool      `json:"isOfficial"`
-	LatestVersion    string    `json:"latestVersion,omitempty"`
-	CapabilityTags   []string  `json:"capabilityTags,omitempty"`
-	ExecutesCode     *bool     `json:"executesCode,omitempty"`
-	VerificationTier string    `json:"verificationTier,omitempty"`
-	ScanStatus       string    `json:"scanStatus,omitempty"`
+	Name               string    `json:"name"`
+	DisplayName        string    `json:"displayName"`
+	Summary            string    `json:"summary,omitempty"`
+	Category           *Category `json:"category"`
+	PluginCategorySlug string    `json:"pluginCategorySlug,omitempty"`
+	Family             string    `json:"family"`
+	Channel            string    `json:"channel"`
+	IsOfficial         bool      `json:"isOfficial"`
+	LatestVersion      string    `json:"latestVersion,omitempty"`
+	CapabilityTags     []string  `json:"capabilityTags,omitempty"`
+	ExecutesCode       *bool     `json:"executesCode,omitempty"`
+	VerificationTier   string    `json:"verificationTier,omitempty"`
+	ScanStatus         string    `json:"scanStatus,omitempty"`
 }
 
 // PluginInfo 是 plugin 详情的元信息块（§3.2 PluginDetail.package）。
 type PluginInfo struct {
-	Name        string    `json:"name"`
-	DisplayName string    `json:"displayName"`
-	Family      string    `json:"family"`
-	Channel     string    `json:"channel"`
-	IsOfficial  bool      `json:"isOfficial"`
-	Category    *Category `json:"category"`
+	Name               string    `json:"name"`
+	DisplayName        string    `json:"displayName"`
+	Family             string    `json:"family"`
+	Channel            string    `json:"channel"`
+	IsOfficial         bool      `json:"isOfficial"`
+	Category           *Category `json:"category"`
+	PluginCategorySlug string    `json:"pluginCategorySlug,omitempty"`
 }
 
 // PluginVersionSummary 是 plugin 最新版本摘要（升级比较取 version）。
@@ -200,12 +202,13 @@ func (s *PluginService) GetPlugin(ctx context.Context, name string) (*PluginDeta
 
 	detail := &PluginDetail{
 		Package: PluginInfo{
-			Name:        d.Package.Name,
-			DisplayName: d.Package.DisplayName,
-			Family:      d.Package.Family,
-			Channel:     d.Package.Channel,
-			IsOfficial:  d.Package.IsOfficial,
-			Category:    translateCategory(d.PluginCategory),
+			Name:               d.Package.Name,
+			DisplayName:        d.Package.DisplayName,
+			Family:             d.Package.Family,
+			Channel:            d.Package.Channel,
+			IsOfficial:         d.Package.IsOfficial,
+			Category:           translateCategory(d.PluginCategory),
+			PluginCategorySlug: d.PluginCategorySlug,
 		},
 		Compatibility: translateCompat(d.Compatibility),
 	}
@@ -265,17 +268,18 @@ func (s *PluginService) ArtifactStreamURL(name, version string) string {
 // 关键翻译：pluginCategory → category（§3.1b）；剥离 hostTargets/minAppVersion；其余字段透传。
 func translatePackage(p clawhub.PackageListItem) PluginListItem {
 	return PluginListItem{
-		Name:             p.Name,
-		DisplayName:      p.DisplayName,
-		Summary:          p.Summary,
-		Category:         translateCategory(p.PluginCategory),
-		Family:           p.Family,
-		Channel:          p.Channel,
-		IsOfficial:       p.IsOfficial,
-		LatestVersion:    p.LatestVersion,
-		CapabilityTags:   p.CapabilityTags,
-		ExecutesCode:     p.ExecutesCode,
-		VerificationTier: p.VerificationTier,
-		ScanStatus:       p.ScanStatus,
+		Name:               p.Name,
+		DisplayName:        p.DisplayName,
+		Summary:            p.Summary,
+		Category:           translateCategory(p.PluginCategory),
+		PluginCategorySlug: p.PluginCategorySlug,
+		Family:             p.Family,
+		Channel:            p.Channel,
+		IsOfficial:         p.IsOfficial,
+		LatestVersion:      p.LatestVersion,
+		CapabilityTags:     p.CapabilityTags,
+		ExecutesCode:       p.ExecutesCode,
+		VerificationTier:   p.VerificationTier,
+		ScanStatus:         p.ScanStatus,
 	}
 }

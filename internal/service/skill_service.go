@@ -22,26 +22,28 @@ type SkillVersionSummary struct {
 
 // SkillListItem 是 skill 列表项的对外契约（§3.1）。
 type SkillListItem struct {
-	Slug          string               `json:"slug"`
-	DisplayName   string               `json:"displayName"`
-	Summary       string               `json:"summary,omitempty"`
-	Category      *Category            `json:"category"`
-	Tags          map[string]string    `json:"tags"`
-	CreatedAt     int64                `json:"createdAt"`
-	UpdatedAt     int64                `json:"updatedAt"`
-	LatestVersion *SkillVersionSummary `json:"latestVersion"`
-	Metadata      *SkillMetadata       `json:"metadata"`
+	Slug              string               `json:"slug"`
+	DisplayName       string               `json:"displayName"`
+	Summary           string               `json:"summary,omitempty"`
+	Category          *Category            `json:"category"`
+	SkillCategorySlug string               `json:"skillCategorySlug,omitempty"`
+	Tags              map[string]string    `json:"tags"`
+	CreatedAt         int64                `json:"createdAt"`
+	UpdatedAt         int64                `json:"updatedAt"`
+	LatestVersion     *SkillVersionSummary `json:"latestVersion"`
+	Metadata          *SkillMetadata       `json:"metadata"`
 }
 
 // SkillInfo 是 skill 详情的元信息块（§3.2 SkillDetail.skill）。
 type SkillInfo struct {
-	Slug        string            `json:"slug"`
-	DisplayName string            `json:"displayName"`
-	Summary     string            `json:"summary,omitempty"`
-	Category    *Category         `json:"category"`
-	Tags        map[string]string `json:"tags"`
-	CreatedAt   int64             `json:"createdAt"`
-	UpdatedAt   int64             `json:"updatedAt"`
+	Slug              string            `json:"slug"`
+	DisplayName       string            `json:"displayName"`
+	Summary           string            `json:"summary,omitempty"`
+	Category          *Category         `json:"category"`
+	SkillCategorySlug string            `json:"skillCategorySlug,omitempty"`
+	Tags              map[string]string `json:"tags"`
+	CreatedAt         int64             `json:"createdAt"`
+	UpdatedAt         int64             `json:"updatedAt"`
 }
 
 // SkillDetail 是 skill 详情的对外契约（§3.2）。
@@ -181,13 +183,14 @@ func (s *SkillService) GetSkill(ctx context.Context, slug string) (*SkillDetail,
 	}
 	return &SkillDetail{
 		Skill: SkillInfo{
-			Slug:        d.Skill.Slug,
-			DisplayName: d.Skill.DisplayName,
-			Summary:     d.Skill.Summary,
-			Category:    translateCategory(d.Skill.Category),
-			Tags:        d.Skill.Tags,
-			CreatedAt:   d.Skill.CreatedAt,
-			UpdatedAt:   d.Skill.UpdatedAt,
+			Slug:              d.Skill.Slug,
+			DisplayName:       d.Skill.DisplayName,
+			Summary:           d.Skill.Summary,
+			Category:          translateCategory(d.Skill.Category),
+			SkillCategorySlug: d.Skill.SkillCategorySlug,
+			Tags:              d.Skill.Tags,
+			CreatedAt:         d.Skill.CreatedAt,
+			UpdatedAt:         d.Skill.UpdatedAt,
 		},
 		LatestVersion: translateSkillVersionSummary(d.LatestVersion),
 		Metadata:      translateSkillMetadata(d.Metadata),
@@ -254,15 +257,16 @@ func (s *SkillService) DownloadStreamURL(slug, version string) string {
 
 func translateSkillListItem(sk clawhub.SkillListItem) SkillListItem {
 	return SkillListItem{
-		Slug:          sk.Slug,
-		DisplayName:   sk.DisplayName,
-		Summary:       sk.Summary,
-		Category:      translateCategory(sk.Category),
-		Tags:          sk.Tags,
-		CreatedAt:     sk.CreatedAt,
-		UpdatedAt:     sk.UpdatedAt,
-		LatestVersion: translateSkillVersionSummary(sk.LatestVersion),
-		Metadata:      translateSkillMetadata(sk.Metadata),
+		Slug:              sk.Slug,
+		DisplayName:       sk.DisplayName,
+		Summary:           sk.Summary,
+		Category:          translateCategory(sk.Category),
+		SkillCategorySlug: sk.SkillCategorySlug,
+		Tags:              sk.Tags,
+		CreatedAt:         sk.CreatedAt,
+		UpdatedAt:         sk.UpdatedAt,
+		LatestVersion:     translateSkillVersionSummary(sk.LatestVersion),
+		Metadata:          translateSkillMetadata(sk.Metadata),
 	}
 }
 
