@@ -37,7 +37,7 @@ type App struct {
 	DB     *gorm.DB
 	// Warmer 周期性预热 skill/plugin 列表缓存（clawhub.CacheWarmInterval，0s 禁用）。
 	// 由 main 用随进程优雅停机取消的 ctx 启动一个 goroutine 运行。
-	Warmer *clawhub.Warmer
+	Warmer *service.Warmer
 }
 
 // wireOptions 承接装配期可覆盖项。生产路径不传任何 Option（全走真实 GORM DAO）；
@@ -147,11 +147,12 @@ func WireApp(cfg *config.Configuration, opts ...Option) (*App, error) {
 	// 见 internal/clawhub/cache.go。
 	packagesClient := clawhub.NewCachingPackagesClient(clawHubClient, rdb, cfg.ClawHub.CacheTTL)
 	skillsClient := clawhub.NewCachingSkillsClient(clawHubClient, rdb, cfg.ClawHub.CacheTTL)
-	// 预热任务：对上面两个 caching 装饰器周期性发起默认列表请求，主动续热 Redis 缓存
-	// （cache_warm_interval=0 时 Warmer.Run 立即返回，等效禁用，仅保留请求式缓存）。
-	warmer := clawhub.NewWarmer(skillsClient, packagesClient, cfg.ClawHub.CacheWarmInterval)
 	pluginService := service.NewPluginService(packagesClient)
 	skillService := service.NewSkillService(skillsClient)
+	// 预热任务：驱动 pluginService/skillService 上桌面端冷启动实际会打的列表+分类聚合，
+	// 周期性续热底层 Redis 缓存（cache_warm_interval=0 时 Warmer.Run 立即返回，等效禁用，
+	// 仅保留请求式缓存）。见 internal/service/warmer.go 顶部注释。
+	warmer := service.NewWarmer(skillService, pluginService, cfg.ClawHub.CacheWarmInterval)
 	telemetryService := service.NewTelemetryService(clawHubClient)
 
 	// ADR-0014：Proxy/Admin 双客户端角色分离。Proxy 转发推理（每用户注入 virtual key）；
