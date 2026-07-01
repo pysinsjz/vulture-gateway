@@ -76,3 +76,31 @@ func (f *erroringSkillsClient) ListSkills(ctx context.Context, p SkillListParams
 	f.listCalls.Add(1)
 	return nil, errors.New("boom")
 }
+
+// 回归测试：预热写入的 Redis key 必须与桌面端发现页首次加载的真实请求 key 一致
+// （sort=downloads，无 cursor/category），否则预热是在给一个没人请求的 key 续热，
+// 桌面端请求依旧会打穿 ClawHub——这正是本文件要防止再次发生的那个 bug。
+func TestWarmer_PopulatesExactKeyDesktopRequests(t *testing.T) {
+	rdb, mr := newTestCacheRDB(t)
+	skills := NewCachingSkillsClient(&fakeSkillsClient{}, rdb, 5*time.Minute)
+	packages := NewCachingPackagesClient(&fakePackagesClient{}, rdb, 5*time.Minute)
+	w := NewWarmer(skills, packages, time.Hour)
+
+	w.warmOnce(context.Background())
+
+	keys := mr.Keys()
+	want := map[string]bool{
+		"gw:hub:skills?sort=downloads":   false,
+		"gw:hub:packages?sort=downloads": false,
+	}
+	for _, k := range keys {
+		if _, ok := want[k]; ok {
+			want[k] = true
+		}
+	}
+	for k, found := range want {
+		if !found {
+			t.Errorf("预热后 Redis 缺少 key %q（实际 keys=%v）", k, keys)
+		}
+	}
+}
