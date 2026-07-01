@@ -35,6 +35,9 @@ type App struct {
 	Engine *gin.Engine
 	Redis  *redis.Client
 	DB     *gorm.DB
+	// Warmer 周期性预热 skill/plugin 列表缓存（clawhub.CacheWarmInterval，0s 禁用）。
+	// 由 main 用随进程优雅停机取消的 ctx 启动一个 goroutine 运行。
+	Warmer *clawhub.Warmer
 }
 
 // wireOptions 承接装配期可覆盖项。生产路径不传任何 Option（全走真实 GORM DAO）；
@@ -144,6 +147,9 @@ func WireApp(cfg *config.Configuration, opts ...Option) (*App, error) {
 	// 见 internal/clawhub/cache.go。
 	packagesClient := clawhub.NewCachingPackagesClient(clawHubClient, rdb, cfg.ClawHub.CacheTTL)
 	skillsClient := clawhub.NewCachingSkillsClient(clawHubClient, rdb, cfg.ClawHub.CacheTTL)
+	// 预热任务：对上面两个 caching 装饰器周期性发起默认列表请求，主动续热 Redis 缓存
+	// （cache_warm_interval=0 时 Warmer.Run 立即返回，等效禁用，仅保留请求式缓存）。
+	warmer := clawhub.NewWarmer(skillsClient, packagesClient, cfg.ClawHub.CacheWarmInterval)
 	pluginService := service.NewPluginService(packagesClient)
 	skillService := service.NewSkillService(skillsClient)
 	telemetryService := service.NewTelemetryService(clawHubClient)
@@ -202,7 +208,7 @@ func WireApp(cfg *config.Configuration, opts ...Option) (*App, error) {
 
 	engine := router.NewRouter(cfg, probeHandler, scaffoldHandler, oauthHandler, loginHandler, passwordHandler, deviceHandler, pluginHandler, skillHandler, telemetryHandler, llmHandler, distributionHandler, bootstrapHandler, jwtAuth, jwtAuthLLM)
 
-	return &App{Engine: engine, Redis: rdb, DB: gdb}, nil
+	return &App{Engine: engine, Redis: rdb, DB: gdb, Warmer: warmer}, nil
 }
 
 // buildRSADecryptor 构造密码解密器。私钥为空时（dev/test）自生成临时 RSA 密钥对，重启即换。

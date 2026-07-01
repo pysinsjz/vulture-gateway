@@ -58,11 +58,17 @@ func main() {
 	}()
 	log.Printf("HTTP 服务监听于 %s", cfg.Server.Addr)
 
+	// skill/plugin 列表缓存预热（clawhub.CacheWarmInterval，0s 时 Warmer.Run 立即返回）；
+	// 随停机信号一起取消，避免优雅停机后仍有后台请求打向 ClawHub。
+	warmCtx, cancelWarm := context.WithCancel(context.Background())
+	go app.Warmer.Run(warmCtx)
+
 	// 优雅停机。
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
 	log.Println("收到停机信号，开始优雅停机…")
+	cancelWarm()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

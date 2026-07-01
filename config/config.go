@@ -104,6 +104,10 @@ type ClawHubConfig struct {
 	// 缓存范围：ListPackages / GetPackage / ListSkills / GetSkill 四个 hub 调用的 raw 响应；
 	// categories 端点内部复用 List* 也间接命中。默认 5m；约定 0s = 禁用缓存（紧急止血用）。
 	CacheTTL time.Duration `mapstructure:"cache_ttl"`
+	// CacheWarmInterval 是后台预热任务主动刷新 skill/plugin 列表缓存的周期（clawhub.Warmer）。
+	// 只覆盖 ListSkills/ListPackages 的默认（无过滤）首页，让常规用户请求不再等首个请求
+	// 触发穿透。默认 1m；约定 0s = 禁用预热任务（仍保留请求式缓存）。
+	CacheWarmInterval time.Duration `mapstructure:"cache_warm_interval"`
 }
 
 // PostgresConfig 数据库连接（ADR-0001：用 PostgreSQL，非 web-go 默认的 MySQL）。
@@ -254,7 +258,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("auth.csrf_ttl", "10m")
 	v.SetDefault("clawhub.base_url", "http://127.0.0.1:3211/api/v1")
 	v.SetDefault("clawhub.timeout", "10s")
-	v.SetDefault("clawhub.cache_ttl", "5m") // 列表/详情 Redis 缓存默认 5m；0s 禁用
+	v.SetDefault("clawhub.cache_ttl", "5m")           // 列表/详情 Redis 缓存默认 5m；0s 禁用
+	v.SetDefault("clawhub.cache_warm_interval", "1m") // 列表缓存预热任务周期默认 1m；0s 禁用预热
 	v.SetDefault("llm.base_url", "http://127.0.0.1:4000")
 	// llm.default_team_alias 无默认值：必须各环境 YAML 显式配置（ADR-0016 fail-loud 防漂移）。
 	v.SetDefault("llm.vkey_cache_ttl", "1h")
