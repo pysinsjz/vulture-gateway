@@ -64,6 +64,17 @@ func (s *LLMService) ImageGenerations(ctx context.Context, userUUID string, body
 	return s.llm.ImageGenerations(ctx, key, body)
 }
 
+// ImageEdits 代理 litellm 图片编辑：解析用户 virtual key 后透传 multipart 请求体与 Content-Type。
+// edits 走 multipart/form-data（图片 + mask + prompt 等），必须把上游 Content-Type（含 boundary）
+// 原样传给 litellm.Client，body 直接转发——非法 multipart 也照转，由 litellm 返标准 400。
+func (s *LLMService) ImageEdits(ctx context.Context, userUUID string, body []byte, contentType string) (*litellm.ProxyResult, error) {
+	key, err := s.vkeys.GetOrCreateVirtualKey(ctx, userUUID)
+	if err != nil {
+		return nil, err
+	}
+	return s.llm.ImageEdits(ctx, key, body, contentType)
+}
+
 // QianwenMultimodalGeneration 代理 litellm DashScope 透传端点（qwen-image-2.0 等）：
 // 解析用户 virtual key 后透传请求体，body 为千问原生形态（input.messages + parameters）。
 // 非法 JSON 同样直接转发，由 litellm 返标准 400。

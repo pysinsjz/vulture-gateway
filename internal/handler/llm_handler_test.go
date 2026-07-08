@@ -38,6 +38,13 @@ func (f *fakeProxy) ImageGenerations(_ context.Context, _ string, _ []byte) (*li
 	return &litellm.ProxyResult{Status: http.StatusOK, Header: h, Body: []byte(`{"data":[]}`)}, nil
 }
 
+// ImageEdits 桩：固定返回 200 JSON；图片编辑自愈路径与 multipart Content-Type 透传由 router 层用真 httptest 覆盖。
+func (f *fakeProxy) ImageEdits(_ context.Context, _ string, _ []byte, _ string) (*litellm.ProxyResult, error) {
+	h := http.Header{}
+	h.Set("Content-Type", "application/json")
+	return &litellm.ProxyResult{Status: http.StatusOK, Header: h, Body: []byte(`{"data":[]}`)}, nil
+}
+
 // QianwenMultimodalGeneration 桩：固定返回 200 JSON；千问透传端点的具体行为由 router 层用真 httptest 覆盖。
 func (f *fakeProxy) QianwenMultimodalGeneration(_ context.Context, _ string, _ []byte) (*litellm.ProxyResult, error) {
 	h := http.Header{}

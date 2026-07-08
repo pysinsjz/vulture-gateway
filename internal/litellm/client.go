@@ -30,6 +30,11 @@ type Client interface {
 	// ImageGenerations 代理 litellm POST /v1/images/generations，注入用户 virtualKey。
 	// OpenAI 图片接口始终为同步 JSON 响应（无 SSE），故复用 ProxyResult 缓冲返回，由 handler 透传。
 	ImageGenerations(ctx context.Context, virtualKey string, body []byte) (*ProxyResult, error)
+	// ImageEdits 代理 litellm POST /v1/images/edits，注入用户 virtualKey。
+	// 与 generations 不同：edits 走 multipart/form-data（包含图片字节 + mask + prompt 等表单字段），
+	// 因此必须把上游请求的 Content-Type（含 boundary）原样透传，而不是写死 application/json。
+	// 同步 JSON 响应形态与 generations 一致：{created, data:[{url|b64_json}]}。
+	ImageEdits(ctx context.Context, virtualKey string, body []byte, contentType string) (*ProxyResult, error)
 	// QianwenMultimodalGeneration 代理 litellm DashScope 透传端点
 	// POST /qianwenai/api/v1/services/aigc/multimodal-generation/generation（如 qwen-image-2.0）。
 	// 上游同步返回 JSON（image 在 output.choices[0].message.content[0].image），故同样缓冲返回。
@@ -114,6 +119,36 @@ func (c *httpClient) ImageGenerations(ctx context.Context, virtualKey string, bo
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("读取 litellm images 响应失败: %w", err)
+	}
+	return &ProxyResult{Status: resp.StatusCode, Header: resp.Header, Body: respBody}, nil
+}
+
+// ImageEdits 转发图片编辑请求并缓冲读完响应体。
+// 关键差异：edits 是 multipart/form-data（图片+mask+prompt 等表单），必须把上游传入的 Content-Type
+// （含 boundary=...）原样写回 outbound 请求；contentType 缺失时回退 application/octet-stream，避免
+// 网关侧静默改写后让 litellm 解多部分失败。response 形态与 generations 一致（同步 JSON），沿用默认 Timeout。
+func (c *httpClient) ImageEdits(ctx context.Context, virtualKey string, body []byte, contentType string) (*ProxyResult, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/images/edits", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("构造 litellm image edits 请求失败: %w", err)
+	}
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	req.Header.Set("Content-Type", contentType)
+	if virtualKey != "" {
+		req.Header.Set("Authorization", "Bearer "+virtualKey)
+	}
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("调用 litellm /v1/images/edits 失败: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("读取 litellm image edits 响应失败: %w", err)
 	}
 	return &ProxyResult{Status: resp.StatusCode, Header: resp.Header, Body: respBody}, nil
 }
